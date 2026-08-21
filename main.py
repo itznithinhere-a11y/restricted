@@ -114,7 +114,6 @@ user = Client(
 RUNNING_TASKS = set()
 
 download_semaphore: Optional[asyncio.Semaphore] = None
-forward_chat_id = None
 
 # One active batch per Telegram user.
 ACTIVE_BATCHES = set()
@@ -262,8 +261,8 @@ async def start(_, message: Message):
         "   **⚡ MEDIA DOWNLOADER**\n"
         "╰━━━━━━━━━━━━━━━━━━━━╯\n\n"
         "🚀 **Fast • Reliable • Professional**\n\n"
-        "Send me a Telegram post or story link and "
-        "I'll download the available media for you.\n\n"
+        "Every command needs a channel ID — media goes "
+        "straight to that channel, never to this chat.\n\n"
         "✨ **Supported**\n"
         "• Photos\n"
         "• Videos\n"
@@ -274,9 +273,11 @@ async def start(_, message: Message):
         "• Media Groups\n"
         "• Telegram Stories\n\n"
         "📦 **Batch Support**\n"
-        "Download multiple posts or stories using a range.\n\n"
+        "Download multiple posts or stories into a channel "
+        "using a range.\n\n"
         "🔐 The connected user account must have access "
-        "to the requested chat/story.\n\n"
+        "to the requested chat/story, and the bot must be "
+        "an admin in your destination channel.\n\n"
         "👇 **Choose an option below**"
     )
 
@@ -296,22 +297,28 @@ HELP_TEXT = (
     "      **📚 HELP CENTER**\n"
     "╰━━━━━━━━━━━━━━━━━━━━╯\n\n"
 
+    "⚠️ Every command needs a **channel ID** as the first "
+    "argument. Media is delivered ONLY to that channel — "
+    "never to this chat.\n\n"
+
     "**📥 SINGLE DOWNLOAD**\n"
-    "`/dl <telegram_post_url>`\n\n"
-    "Or simply paste a Telegram post URL.\n\n"
+    "`/dl <channel_id> <telegram_post_url>`\n\n"
+    "Example:\n"
+    "`/dl -1001234567890 https://t.me/channel/123`\n\n"
 
     "**📦 BATCH DOWNLOAD**\n"
-    "`/bdl <start_url> <end_url>`\n\n"
+    "`/bdl <channel_id> <start_url> <end_url>`\n\n"
     "Example:\n"
-    "`/bdl https://t.me/channel/100 https://t.me/channel/150`\n\n"
+    "`/bdl -1001234567890 https://t.me/channel/100 "
+    "https://t.me/channel/150`\n\n"
 
     "**📖 STORY DOWNLOAD**\n"
-    "`/dls <story_url>`\n\n"
+    "`/dls <channel_id> <story_url>`\n\n"
     "Example:\n"
-    "`/dls https://t.me/username/s/12`\n\n"
+    "`/dls -1001234567890 https://t.me/username/s/12`\n\n"
 
     "**📚 BATCH STORY**\n"
-    "`/bdls <start_story> <end_story>`\n\n"
+    "`/bdls <channel_id> <start_story> <end_story>`\n\n"
 
     "**🛑 CANCEL**\n"
     "`/killall`\n"
@@ -330,8 +337,10 @@ HELP_TEXT = (
     "Downloads the current log file.\n\n"
 
     "━━━━━━━━━━━━━━━━━━━━\n"
-    "💡 **Tip:** For restricted content, the connected "
-    "user account must have permission to access it."
+    "💡 **Tip:** The bot must be an admin with 'Post Messages' "
+    "permission in the channel you specify. For restricted "
+    "content, the connected user account must also have "
+    "permission to access the source chat."
 )
 
 
@@ -365,9 +374,10 @@ async def callbacks(client, query):
                 "   **⚡ MEDIA DOWNLOADER**\n"
                 "╰━━━━━━━━━━━━━━━━━━━━╯\n\n"
                 "Ready to download.\n\n"
-                "📥 Send a Telegram post link\n"
-                "📖 Send a Telegram story link\n"
-                "📦 Use batch commands for ranges.",
+                "Every command needs a channel ID as its "
+                "first argument — media goes straight there, "
+                "never to this chat.\n\n"
+                "Use `/help` for the full command list.",
                 reply_markup=main_keyboard(),
             )
 
@@ -382,8 +392,7 @@ async def callbacks(client, query):
 
             await query.message.edit(
                 "📥 **Single Download**\n\n"
-                "Send a Telegram post link directly or use:\n\n"
-                "`/dl https://t.me/channel/123`\n\n"
+                "`/dl <channel_id> https://t.me/channel/123`\n\n"
                 "Supported media includes photos, videos, "
                 "audio, documents and media groups.",
                 reply_markup=help_keyboard(),
@@ -394,9 +403,10 @@ async def callbacks(client, query):
             await query.message.edit(
                 "📦 **Batch Download**\n\n"
                 "Use:\n"
-                "`/bdl start_link end_link`\n\n"
+                "`/bdl <channel_id> start_link end_link`\n\n"
                 "Example:\n"
-                "`/bdl https://t.me/channel/100 "
+                "`/bdl -1001234567890 "
+                "https://t.me/channel/100 "
                 "https://t.me/channel/150`\n\n"
                 f"Maximum range: `{MAX_BDL_RANGE}` posts.",
                 reply_markup=help_keyboard(),
@@ -407,9 +417,10 @@ async def callbacks(client, query):
             await query.message.edit(
                 "📖 **Story Downloader**\n\n"
                 "Single story:\n"
-                "`/dls https://t.me/user/s/12`\n\n"
+                "`/dls <channel_id> https://t.me/user/s/12`\n\n"
                 "Story range:\n"
-                "`/bdls https://t.me/user/s/10 "
+                "`/bdls <channel_id> "
+                "https://t.me/user/s/10 "
                 "https://t.me/user/s/20`",
                 reply_markup=help_keyboard(),
             )
@@ -452,37 +463,82 @@ async def callbacks(client, query):
 # FORWARD TARGET
 # ============================================================
 
-async def get_forward_target(client):
-    """
-    Resolve/check forwarding destination.
+# ============================================================
+# FORWARD TARGET (per-command, user-supplied)
+# ============================================================
 
-    The result is cached globally so every media item doesn't
-    repeatedly resolve the destination.
+def parse_channel_arg(raw: str):
     """
-    global forward_chat_id
+    Turn a user-supplied channel argument into something
+    resolve_forward_chat_id() understands.
 
-    if not forward_chat_id:
+    Accepts:
+      -1001234567890        (numeric chat id)
+      @mychannel             (username)
+      mychannel               (username without @)
+      https://t.me/mychannel  (link)
+    """
+    if not raw:
         return None
+
+    raw = raw.strip()
+
+    for prefix in (
+        "https://t.me/",
+        "http://t.me/",
+        "https://telegram.me/",
+        "http://telegram.me/",
+    ):
+        if raw.lower().startswith(prefix):
+            raw = raw[len(prefix):]
+            break
+
+    raw = raw.strip("/")
+
+    if not raw:
+        return None
+
+    if raw.lstrip("-").isdigit():
+        return int(raw)
+
+    if not raw.startswith("@"):
+        raw = f"@{raw}"
+
+    return raw
+
+
+async def resolve_and_check_target(client, raw_channel_id: str):
+    """
+    Parse + validate a user-supplied channel id/username.
+
+    Returns (chat_id, None) on success or (None, error_message)
+    on failure. The caller must never fall back to sending in
+    the requester's DM when this fails — it should report the
+    error and stop.
+    """
+
+    parsed = parse_channel_arg(raw_channel_id)
+
+    if parsed is None:
+        return None, "Invalid channel ID/username."
+
+    try:
+        resolved = await resolve_forward_chat_id(parsed)
+    except Exception as e:
+        return None, f"Could not parse channel: {e}"
 
     try:
         ok, err_msg = await check_forward_permission(
             client,
-            forward_chat_id,
+            resolved,
         )
-
-        if not ok:
-            LOGGER(__name__).warning(
-                f"Forward permission check failed: {err_msg}"
-            )
-            return None
-
-        return forward_chat_id
-
     except Exception as e:
-        LOGGER(__name__).error(
-            f"Forward target check failed: {e}"
-        )
-        return None
+        return None, f"Could not verify channel access: {e}"
+
+    if not ok:
+        return None, err_msg
+
+    return resolved, None
 
 
 # ============================================================
@@ -509,9 +565,14 @@ async def handle_download(
     client: Client,
     message: Message,
     post_url: str,
+    forward_chat_id,
 ):
     """
     Download a single Telegram post.
+
+    forward_chat_id is REQUIRED and must already be resolved +
+    permission-checked by the caller. Media is sent ONLY to
+    that channel — never to the requester's DM.
 
     IMPORTANT:
     Returns True/False instead of silently swallowing errors.
@@ -519,6 +580,16 @@ async def handle_download(
     """
 
     global download_semaphore
+
+    if not forward_chat_id:
+        LOGGER(__name__).error(
+            "handle_download called without a forward_chat_id "
+            "— refusing (media must never go to DM)."
+        )
+        await message.reply(
+            "❌ **No destination channel set for this task.**"
+        )
+        return False
 
     if download_semaphore is None:
         download_semaphore = asyncio.Semaphore(
@@ -605,13 +676,11 @@ async def handle_download(
 
             if chat_message.media_group_id:
 
-                target = await get_forward_target(client)
-
                 result = await processMediaGroup(
                     chat_message,
                     client,
                     message,
-                    forward_chat_id=target,
+                    forward_chat_id=forward_chat_id,
                 )
 
                 if not result:
@@ -771,12 +840,6 @@ async def handle_download(
                     media_type = "document"
 
                 # --------------------------------------------
-                # Forward target
-                # --------------------------------------------
-
-                target = await get_forward_target(client)
-
-                # --------------------------------------------
                 # Send result
                 # --------------------------------------------
 
@@ -789,7 +852,7 @@ async def handle_download(
                     raw_caption_entities,
                     progress_message,
                     start_time,
-                    forward_chat_id=target,
+                    forward_chat_id=forward_chat_id,
                 )
 
                 return True
@@ -834,8 +897,9 @@ async def handle_download(
 
                 try:
 
-                    sent = await message.reply(
-                        text,
+                    await client.send_message(
+                        chat_id=forward_chat_id,
+                        text=text,
                         entities=entities or None,
                     )
 
@@ -844,29 +908,23 @@ async def handle_download(
                     if "ENTITY_TEXT_INVALID" not in str(e):
                         raise
 
-                    sent = await message.reply(text)
+                    await client.send_message(
+                        chat_id=forward_chat_id,
+                        text=text,
+                    )
 
-                # --------------------------------------------
-                # Copy text to forwarding target
-                # --------------------------------------------
+                except Exception as e:
 
-                target = await get_forward_target(client)
+                    LOGGER(__name__).error(
+                        f"Text forwarding failed: {e}"
+                    )
 
-                if target and sent:
+                    await message.reply(
+                        "❌ **Failed to forward text post "
+                        "to the channel.**"
+                    )
 
-                    try:
-
-                        await client.copy_message(
-                            chat_id=target,
-                            from_chat_id=sent.chat.id,
-                            message_id=sent.id,
-                        )
-
-                    except Exception as e:
-
-                        LOGGER(__name__).error(
-                            f"Text forwarding failed: {e}"
-                        )
+                    return False
 
                 return True
 
@@ -983,9 +1041,26 @@ async def handle_story_download(
     client: Client,
     message: Message,
     story_url: str,
+    forward_chat_id,
 ):
+    """
+    forward_chat_id is REQUIRED and must already be resolved +
+    permission-checked by the caller. The story is sent ONLY
+    to that channel — never to the requester's DM.
+    """
 
     global download_semaphore
+
+    if not forward_chat_id:
+        LOGGER(__name__).error(
+            "handle_story_download called without a "
+            "forward_chat_id — refusing (media must never go "
+            "to DM)."
+        )
+        await message.reply(
+            "❌ **No destination channel set for this task.**"
+        )
+        return False
 
     if download_semaphore is None:
         download_semaphore = asyncio.Semaphore(
@@ -1191,10 +1266,6 @@ async def handle_story_download(
                 else "photo"
             )
 
-            target = await get_forward_target(
-                client
-            )
-
             await send_media(
                 client,
                 message,
@@ -1204,7 +1275,7 @@ async def handle_story_download(
                 raw_caption_entities,
                 progress_message,
                 start_time,
-                forward_chat_id=target,
+                forward_chat_id=forward_chat_id,
             )
 
             return True
@@ -1297,17 +1368,24 @@ async def handle_story_download(
 )
 async def download_media(client, message):
 
-    if len(message.command) < 2:
+    args = message.text.split()
+
+    if len(args) != 3:
 
         await message.reply(
             "📥 **Single Download**\n\n"
             "Usage:\n"
-            "`/dl <telegram_post_url>`"
+            "`/dl <channel_id> <telegram_post_url>`\n\n"
+            "Example:\n"
+            "`/dl -1001234567890 https://t.me/channel/123`\n"
+            "or\n"
+            "`/dl @mychannel https://t.me/channel/123`"
         )
 
         return
 
-    url = message.command[1].strip()
+    channel_arg = args[1].strip()
+    url = args[2].strip()
 
     if not url.startswith("https://t.me/"):
 
@@ -1318,11 +1396,25 @@ async def download_media(client, message):
 
         return
 
+    target, err = await resolve_and_check_target(
+        client, channel_arg
+    )
+
+    if not target:
+
+        await message.reply(
+            "❌ **Could not use that channel.**\n\n"
+            f"`{err}`"
+        )
+
+        return
+
     await track_task(
         handle_download(
             client,
             message,
             url,
+            target,
         )
     )
 
@@ -1336,17 +1428,22 @@ async def download_media(client, message):
 )
 async def download_story(client, message):
 
-    if len(message.command) < 2:
+    args = message.text.split()
+
+    if len(args) != 3:
 
         await message.reply(
             "📖 **Story Download**\n\n"
             "Usage:\n"
-            "`/dls https://t.me/username/s/12`"
+            "`/dls <channel_id> <story_url>`\n\n"
+            "Example:\n"
+            "`/dls -1001234567890 https://t.me/username/s/12`"
         )
 
         return
 
-    url = message.command[1].strip()
+    channel_arg = args[1].strip()
+    url = args[2].strip()
 
     if not is_story_link(url):
 
@@ -1358,11 +1455,25 @@ async def download_story(client, message):
 
         return
 
+    target, err = await resolve_and_check_target(
+        client, channel_arg
+    )
+
+    if not target:
+
+        await message.reply(
+            "❌ **Could not use that channel.**\n\n"
+            f"`{err}`"
+        )
+
+        return
+
     await track_task(
         handle_story_download(
             client,
             message,
             url,
+            target,
         )
     )
 
@@ -1398,20 +1509,36 @@ async def download_story_range(client, message):
     args = message.text.split()
 
     if (
-        len(args) != 3
+        len(args) != 4
         or not all(
             is_story_link(x)
-            for x in args[1:]
+            for x in args[2:]
         )
     ):
 
         await message.reply(
             "📚 **Batch Story Download**\n\n"
             "Usage:\n"
-            "`/bdls start_story end_story`\n\n"
+            "`/bdls <channel_id> start_story end_story`\n\n"
             "Example:\n"
-            "`/bdls https://t.me/user/s/10 "
+            "`/bdls -1001234567890 "
+            "https://t.me/user/s/10 "
             "https://t.me/user/s/25`"
+        )
+
+        return
+
+    channel_arg = args[1].strip()
+
+    target, err = await resolve_and_check_target(
+        client, channel_arg
+    )
+
+    if not target:
+
+        await message.reply(
+            "❌ **Could not use that channel.**\n\n"
+            f"`{err}`"
         )
 
         return
@@ -1432,11 +1559,11 @@ async def download_story_range(client, message):
     try:
 
         start_chat, start_id = (
-            getStoryChatMsgID(args[1])
+            getStoryChatMsgID(args[2])
         )
 
         end_chat, end_id = (
-            getStoryChatMsgID(args[2])
+            getStoryChatMsgID(args[3])
         )
 
         if str(start_chat).lower() != str(
@@ -1518,6 +1645,7 @@ async def download_story_range(client, message):
                         client,
                         message,
                         url,
+                        target,
                     )
                 )
 
@@ -1631,24 +1759,26 @@ async def download_range(client, message):
     # Validation
     # --------------------------------------------------------
 
-    if len(args) != 3:
+    if len(args) != 4:
 
         await message.reply(
             "╭━━━━━━━━━━━━━━━━━━━━╮\n"
             "       **📦 BATCH DOWNLOAD**\n"
             "╰━━━━━━━━━━━━━━━━━━━━╯\n\n"
             "**Usage**\n"
-            "`/bdl start_link end_link`\n\n"
+            "`/bdl <channel_id> start_link end_link`\n\n"
             "**Example**\n"
-            "`/bdl https://t.me/channel/100 "
+            "`/bdl -1001234567890 "
+            "https://t.me/channel/100 "
             "https://t.me/channel/150`\n\n"
             f"📌 Maximum range: `{MAX_BDL_RANGE}` posts"
         )
 
         return
 
-    start_url = args[1].strip()
-    end_url = args[2].strip()
+    channel_arg = args[1].strip()
+    start_url = args[2].strip()
+    end_url = args[3].strip()
 
     if not (
         start_url.startswith("https://t.me/")
@@ -1658,6 +1788,23 @@ async def download_range(client, message):
         await message.reply(
             "❌ **Invalid Telegram URL.**\n\n"
             "Only `https://t.me/...` links are supported."
+        )
+
+        return
+
+    # --------------------------------------------------------
+    # Resolve + validate the destination channel
+    # --------------------------------------------------------
+
+    target, err = await resolve_and_check_target(
+        client, channel_arg
+    )
+
+    if not target:
+
+        await message.reply(
+            "❌ **Could not use that channel.**\n\n"
+            f"`{err}`"
         )
 
         return
@@ -1956,6 +2103,7 @@ async def download_range(client, message):
                                 client,
                                 message,
                                 url,
+                                target,
                             )
                         )
                     )
@@ -2135,51 +2283,19 @@ async def handle_any_message(
     if text.startswith("/"):
         return
 
-    # --------------------------------------------------------
-    # Story
-    # --------------------------------------------------------
-
-    if is_story_link(text):
-
-        await track_task(
-            handle_story_download(
-                client,
-                message,
-                text,
-            )
-        )
-
-        return
-
-    # --------------------------------------------------------
-    # Post
-    # --------------------------------------------------------
-
-    if text.startswith(
-        (
-            "https://t.me/",
-            "http://t.me/",
-            "https://telegram.me/",
-            "http://telegram.me/",
-        )
-    ):
-
-        await track_task(
-            handle_download(
-                client,
-                message,
-                text,
-            )
-        )
-
-        return
+    # A bare pasted link has no channel id attached to it, and
+    # this bot never sends media to the requester's DM — so we
+    # can't process it directly. Point the user to the command
+    # form instead.
 
     await message.reply(
-        "👋 **Send me a Telegram link to start.**\n\n"
+        "👋 **Please use a command with a channel ID — "
+        "I only deliver to the channel you specify, "
+        "never to this chat.**\n\n"
         "📥 Post:\n"
-        "`https://t.me/channel/123`\n\n"
+        "`/dl <channel_id> https://t.me/channel/123`\n\n"
         "📖 Story:\n"
-        "`https://t.me/user/s/12`\n\n"
+        "`/dls <channel_id> https://t.me/user/s/12`\n\n"
         "Or use `/help` for all commands."
     )
 
@@ -2419,7 +2535,6 @@ async def cancel_all_tasks(_, message):
 async def initialize():
 
     global download_semaphore
-    global forward_chat_id
 
     # --------------------------------------------------------
     # Semaphore
@@ -2434,44 +2549,11 @@ async def initialize():
         f"{MAX_CONCURRENT_DOWNLOADS}"
     )
 
-    # --------------------------------------------------------
-    # Forward target
-    # --------------------------------------------------------
-
-    configured_forward = cfg(
-        "FORWARD_CHAT_ID",
-        None,
+    LOGGER(__name__).info(
+        "Forwarding is per-command: pass a channel id/username "
+        "as the first argument to /dl, /dls, /bdl, /bdls. "
+        "No FORWARD_CHAT_ID is read from config.py."
     )
-
-    if configured_forward:
-
-        try:
-
-            forward_chat_id = (
-                await resolve_forward_chat_id(
-                    configured_forward
-                )
-            )
-
-            LOGGER(__name__).info(
-                "Auto-forward enabled. "
-                f"Target: {forward_chat_id}"
-            )
-
-        except Exception as e:
-
-            forward_chat_id = None
-
-            LOGGER(__name__).error(
-                "Could not resolve forward target: "
-                f"{e}"
-            )
-
-    else:
-
-        LOGGER(__name__).info(
-            "Auto-forward disabled."
-        )
 
 
 # ============================================================
