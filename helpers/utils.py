@@ -132,23 +132,38 @@ def progressArgs(action: str, progress_message, start_time):
 
 async def send_media(
     bot, message, media_path, media_type, caption, caption_entities,
-    progress_message, start_time, forward_chat_id=None
+    progress_message, start_time, forward_chat_id
 ):
     file_size = os.path.getsize(media_path)
 
     if not await fileSizeLimit(file_size, message, "upload"):
         return
 
+    # forward_chat_id is REQUIRED — this bot never sends media
+    # to the requester's DM, only to the specified channel.
+    if not forward_chat_id:
+        LOGGER(__name__).error(
+            "send_media called without a forward_chat_id — "
+            "refusing to send to DM."
+        )
+        await message.reply(
+            "❌ **No destination channel set for this task.**"
+        )
+        return
+
     progress_args = progressArgs("📥 Uploading Progress", progress_message, start_time)
-    LOGGER(__name__).info(f"Uploading media: {media_path} ({media_type})")
+    LOGGER(__name__).info(f"Uploading media: {media_path} ({media_type}) -> {forward_chat_id}")
+
+    target_chat_id = forward_chat_id
 
     sent_message = None
 
     async def _send_once(cap, ents):
         nonlocal sent_message
         if media_type == "photo":
-            sent_message = await message.reply_photo(
-                media_path,
+            sent_message = await bot.send_photo(
+                chat_id=target_chat_id,
+                photo=media_path,
                 caption=cap,
                 caption_entities=ents or None,
                 progress=Leaves.progress_for_pyrogram,
@@ -168,8 +183,9 @@ async def send_media(
 
             thumb = await get_video_thumbnail(media_path, duration)
 
-            sent_message = await message.reply_video(
-                media_path,
+            sent_message = await bot.send_video(
+                chat_id=target_chat_id,
+                video=media_path,
                 duration=duration,
                 width=width,
                 height=height,
@@ -185,8 +201,9 @@ async def send_media(
             return
         if media_type == "audio":
             duration, artist, title, _, _ = await get_media_info(media_path)
-            sent_message = await message.reply_audio(
-                media_path,
+            sent_message = await bot.send_audio(
+                chat_id=target_chat_id,
+                audio=media_path,
                 duration=duration,
                 performer=artist,
                 title=title,
@@ -197,8 +214,9 @@ async def send_media(
             )
             return
         if media_type == "document":
-            sent_message = await message.reply_document(
-                media_path,
+            sent_message = await bot.send_document(
+                chat_id=target_chat_id,
+                document=media_path,
                 caption=cap,
                 caption_entities=ents or None,
                 progress=Leaves.progress_for_pyrogram,
@@ -225,26 +243,10 @@ async def send_media(
                 continue
             raise
 
-    if forward_chat_id and sent_message:
-        for attempt in range(2):
-            try:
-                await bot.copy_message(
-                    chat_id=forward_chat_id,
-                    from_chat_id=sent_message.chat.id,
-                    message_id=sent_message.id,
-                )
-                LOGGER(__name__).info(f"Copied media to chat: {forward_chat_id}")
-                break
-            except FloodWait as e:
-                wait_s = int(getattr(e, "value", 0) or 0)
-                LOGGER(__name__).warning(f"FloodWait while copying media: {wait_s}s")
-                if wait_s > 0 and attempt == 0:
-                    await asyncio.sleep(wait_s + 1)
-                    continue
-                LOGGER(__name__).error(f"Failed to copy media after retry: FloodWait")
-            except Exception as e:
-                LOGGER(__name__).error(f"Failed to copy media to {forward_chat_id}: {e}")
-                break
+    if sent_message:
+        LOGGER(__name__).info(f"Media sent directly to channel: {forward_chat_id}")
+
+    return sent_message
 
 
 async def download_single_media(msg, progress_message, start_time):
@@ -282,7 +284,19 @@ async def download_single_media(msg, progress_message, start_time):
     return ("skip", None, None)
 
 
-async def processMediaGroup(chat_message, bot, message, forward_chat_id=None):
+async def processMediaGroup(chat_message, bot, message, forward_chat_id):
+    # forward_chat_id is REQUIRED — this bot never sends media
+    # to the requester's DM, only to the specified channel.
+    if not forward_chat_id:
+        LOGGER(__name__).error(
+            "processMediaGroup called without a forward_chat_id "
+            "— refusing to send to DM."
+        )
+        await message.reply(
+            "❌ **No destination channel set for this task.**"
+        )
+        return False
+
     media_group_messages = await chat_message.get_media_group()
     valid_media = []
     temp_paths = []
@@ -315,12 +329,18 @@ async def processMediaGroup(chat_message, bot, message, forward_chat_id=None):
 
     LOGGER(__name__).info(f"Valid media count: {len(valid_media)}")
 
+    # Send straight to the configured forward channel — the user's DM never
+    # receives the media group itself when forwarding is configured.
+    # If no forward channel is configured, fall back to the DM so the
+    # download isn't silently lost.
+    target_chat_id = forward_chat_id
+
     if valid_media:
         sent_messages = []
         try:
             for attempt in range(3):
                 try:
-                    sent_messages = await bot.send_media_group(chat_id=message.chat.id, media=valid_media)
+                    sent_messages = await bot.send_media_group(chat_id=target_chat_id, media=valid_media)
                     await progress_message.delete()
                     break
                 except FloodWait as e:
@@ -346,31 +366,31 @@ async def processMediaGroup(chat_message, bot, message, forward_chat_id=None):
                     sent = None
                     if isinstance(media, InputMediaPhoto):
                         sent = await bot.send_photo(
-                            chat_id=message.chat.id,
+                            chat_id=target_chat_id,
                             photo=media.media,
                             caption=media.caption,
                         )
                     elif isinstance(media, InputMediaVideo):
                         sent = await bot.send_video(
-                            chat_id=message.chat.id,
+                            chat_id=target_chat_id,
                             video=media.media,
                             caption=media.caption,
                         )
                     elif isinstance(media, InputMediaDocument):
                         sent = await bot.send_document(
-                            chat_id=message.chat.id,
+                            chat_id=target_chat_id,
                             document=media.media,
                             caption=media.caption,
                         )
                     elif isinstance(media, InputMediaAudio):
                         sent = await bot.send_audio(
-                            chat_id=message.chat.id,
+                            chat_id=target_chat_id,
                             audio=media.media,
                             caption=media.caption,
                         )
                     elif isinstance(media, Voice):
                         sent = await bot.send_voice(
-                            chat_id=message.chat.id,
+                            chat_id=target_chat_id,
                             voice=media.media,
                             caption=media.caption,
                         )
@@ -383,29 +403,8 @@ async def processMediaGroup(chat_message, bot, message, forward_chat_id=None):
 
             await progress_message.delete()
 
-        if forward_chat_id and sent_messages:
-            try:
-                msg_ids = [m.id for m in sent_messages if m]
-                if msg_ids:
-                    source_chat_id = sent_messages[0].chat.id
-                    for attempt in range(2):
-                        try:
-                            await bot.copy_media_group(
-                                chat_id=forward_chat_id,
-                                from_chat_id=source_chat_id,
-                                message_id=msg_ids[0],
-                            )
-                            LOGGER(__name__).info(f"Copied media group to chat: {forward_chat_id}")
-                            break
-                        except FloodWait as e:
-                            wait_s = int(getattr(e, "value", 0) or 0)
-                            LOGGER(__name__).warning(f"FloodWait while copying media group: {wait_s}s")
-                            if wait_s > 0 and attempt == 0:
-                                await asyncio.sleep(wait_s + 1)
-                                continue
-                            raise
-            except Exception as e:
-                LOGGER(__name__).error(f"Failed to copy media group to {forward_chat_id}: {e}")
+        if sent_messages:
+            LOGGER(__name__).info(f"Media group sent directly to channel: {forward_chat_id}")
 
         for path in temp_paths + invalid_paths:
             cleanup_download(path)

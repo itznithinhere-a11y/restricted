@@ -13,9 +13,17 @@ from pyrogram.errors import (
 )
 
 
-async def resolve_forward_chat_id(raw: str):
+async def resolve_forward_chat_id(raw):
+    # config.py may provide this as an int (e.g. -1004334792305), a numeric
+    # string, or a @username / t.me link — handle all three safely.
+    if isinstance(raw, int):
+        return raw
+
+    raw = str(raw).strip()
+
     if raw.lstrip("-").isdigit():
         return int(raw)
+
     return raw
 
 
