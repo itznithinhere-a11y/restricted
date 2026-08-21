@@ -1,0 +1,37 @@
+[21-Aug-26 01:38:50 PM - INFO] - <module>() - Line 2485: __main__ - ========================================
+[21-Aug-26 01:38:50 PM - INFO] - <module>() - Line 2489: __main__ - PRO MEDIA DOWNLOADER STARTING
+[21-Aug-26 01:38:50 PM - INFO] - <module>() - Line 2493: __main__ - Batch limit: 2000
+[21-Aug-26 01:38:50 PM - INFO] - <module>() - Line 2497: __main__ - Batch size: 10
+[21-Aug-26 01:38:50 PM - INFO] - <module>() - Line 2501: __main__ - Download concurrency: 2
+[21-Aug-26 01:38:50 PM - INFO] - <module>() - Line 2506: __main__ - ========================================
+[21-Aug-26 01:38:50 PM - INFO] - initialize() - Line 2432: __main__ - Download semaphore initialized: 2
+[21-Aug-26 01:38:50 PM - INFO] - initialize() - Line 2472: __main__ - Auto-forward disabled.
+[21-Aug-26 01:38:51 PM - INFO] - <module>() - Line 2517: __main__ - User session started.
+[21-Aug-26 01:39:05 PM - INFO] - handle_download() - Line 557: __main__ - Processing post: https://t.me/Saleem_Sir_Physics_NEET_0/1732
+[21-Aug-26 01:39:14 PM - INFO] - handle_download() - Line 557: __main__ - Processing post: https://t.me/Saleem_Sir_Physics_NEET_0/1753
+[21-Aug-26 01:39:53 PM - INFO] - handle_download() - Line 557: __main__ - Processing post: https://t.me/Saleem_Sir_Physics_NEET_0/1864
+[21-Aug-26 01:39:57 PM - INFO] - handle_download() - Line 740: __main__ - Downloaded: C:\Users\xyz\Documents\Bots\SessionBotRESTRICTEDContent\downloads\272\New NCERT SCIENTISTS & DISCOVERIES Compiled.pdf (489915 bytes)
+[21-Aug-26 01:39:57 PM - INFO] - send_media() - Line 143: helpers.utils - Uploading media: C:\Users\xyz\Documents\Bots\SessionBotRESTRICTEDContent\downloads\272\New NCERT SCIENTISTS & DISCOVERIES Compiled.pdf (document)
+[21-Aug-26 01:40:01 PM - INFO] - cleanup_download() - Line 28: helpers.files - Cleaning Download: C:\Users\xyz\Documents\Bots\SessionBotRESTRICTEDContent\downloads\272\New NCERT SCIENTISTS & DISCOVERIES Compiled.pdf
+[21-Aug-26 01:41:13 PM - INFO] - handle_download() - Line 557: __main__ - Processing post: https://t.me/Saleem_Sir_Physics_NEET_0/2071
+[21-Aug-26 01:42:05 PM - INFO] - handle_download() - Line 557: __main__ - Processing post: https://t.me/Saleem_Sir_Physics_NEET_0/2218
+[21-Aug-26 01:42:06 PM - INFO] - handle_download() - Line 740: __main__ - Downloaded: C:\Users\xyz\Documents\Bots\SessionBotRESTRICTEDContent\downloads\272\2218.jpg (46682 bytes)
+[21-Aug-26 01:42:06 PM - INFO] - send_media() - Line 143: helpers.utils - Uploading media: C:\Users\xyz\Documents\Bots\SessionBotRESTRICTEDContent\downloads\272\2218.jpg (photo)
+[21-Aug-26 01:42:07 PM - INFO] - cleanup_download() - Line 28: helpers.files - Cleaning Download: C:\Users\xyz\Documents\Bots\SessionBotRESTRICTEDContent\downloads\272\2218.jpg
+[21-Aug-26 01:42:14 PM - INFO] - handle_download() - Line 557: __main__ - Processing post: https://t.me/Saleem_Sir_Physics_NEET_0/2240
+[21-Aug-26 01:42:14 PM - INFO] - processMediaGroup() - Line 293: helpers.utils - Downloading media group with 8 items...
+[21-Aug-26 01:42:32 PM - INFO] - processMediaGroup() - Line 316: helpers.utils - Valid media count: 8
+[21-Aug-26 01:42:42 PM - INFO] - cleanup_download() - Line 28: helpers.files - Cleaning Download: C:\Users\xyz\Documents\Bots\SessionBotRESTRICTEDContent\downloads\photo_2026-07-10_18-02-38_7676394768675701760.jpg
+[21-Aug-26 01:42:42 PM - INFO] - cleanup_download() - Line 28: helpers.files - Cleaning Download: C:\Users\xyz\Documents\Bots\SessionBotRESTRICTEDContent\downloads\photo_2026-07-10_18-02-43_7676394768682680320.jpg
+[21-Aug-26 01:42:42 PM - INFO] - cleanup_download() - Line 28: helpers.files - Cleaning Download: C:\Users\xyz\Documents\Bots\SessionBotRESTRICTEDContent\downloads\photo_2026-07-10_18-02-29_7676394768692343808.jpg
+[21-Aug-26 01:42:42 PM - INFO] - cleanup_download() - Line 28: helpers.files - Cleaning Download: C:\Users\xyz\Documents\Bots\SessionBotRESTRICTEDContent\downloads\photo_2026-07-10_18-02-34_7676394768696967168.jpg
+[21-Aug-26 01:42:42 PM - INFO] - cleanup_download() - Line 28: helpers.files - Cleaning Download: C:\Users\xyz\Documents\Bots\SessionBotRESTRICTEDContent\downloads\photo_2026-07-10_18-02-21_7676394768924290048.jpg
+[21-Aug-26 01:42:42 PM - INFO] - cleanup_download() - Line 28: helpers.files - Cleaning Download: C:\Users\xyz\Documents\Bots\SessionBotRESTRICTEDContent\downloads\photo_2026-07-10_18-02-38_7676394768930069504.jpg
+[21-Aug-26 01:42:42 PM - INFO] - cleanup_download() - Line 28: helpers.files - Cleaning Download: C:\Users\xyz\Documents\Bots\SessionBotRESTRICTEDContent\downloads\photo_2026-07-10_18-02-42_7676394768938506240.jpg
+[21-Aug-26 01:42:42 PM - INFO] - cleanup_download() - Line 28: helpers.files - Cleaning Download: C:\Users\xyz\Documents\Bots\SessionBotRESTRICTEDContent\downloads\photo_2026-07-10_18-02-37_7676394768946099200.jpg
+[21-Aug-26 01:44:33 PM - INFO] - handle_download() - Line 557: __main__ - Processing post: https://t.me/Saleem_Sir_Physics_NEET_0/2553
+[21-Aug-26 01:44:33 PM - INFO] - handle_download() - Line 557: __main__ - Processing post: https://t.me/Saleem_Sir_Physics_NEET_0/2555
+[21-Aug-26 01:44:33 PM - INFO] - handle_download() - Line 557: __main__ - Processing post: https://t.me/Saleem_Sir_Physics_NEET_0/2556
+[21-Aug-26 01:44:33 PM - INFO] - handle_download() - Line 557: __main__ - Processing post: https://t.me/Saleem_Sir_Physics_NEET_0/2557
+[21-Aug-26 01:44:34 PM - INFO] - handle_download() - Line 557: __main__ - Processing post: https://t.me/Saleem_Sir_Physics_NEET_0/2558
+[21-Aug-26 01:44:34 PM - INFO] - handle_download() - Line 557: __main__ - Processing post: https://t.me/Saleem_Sir_Physics_NEET_0/2559
