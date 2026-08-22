@@ -8,12 +8,12 @@ from time import time
 # TELEGRAM CONFIG
 # ═══════════════════════════════════════════════════════════════════════════════
 
-API_ID = 38261047
-API_HASH = "9d50d164fa275483f5efd19793efbd31"
-BOT_TOKEN = "8748789520:AAEVfU8zq_CtrLZtWQPCvzvOAQjpifVT970"
+API_ID = 37374661
+API_HASH = "e1956491ead91a58c8c1f263a3f30326"
+BOT_TOKEN = "8803919104:AAEHmgaWjDFi_r2gJqbPPYz3RykhEdu6dYA"
 
 # Pyrogram user session string
-SESSION_STRING = "BQJH0TcApCP2iMORiNMlNWV5dGPYRUu5a39ICRV47cBP5XYSMvipEvhNzBbbSWMOPfe_AywtET2hrWOzGSLOLqcN1uJGHc0tok9Yh6_y37wiHQkhHsUwtCIcEnQfclQW1OdylsSqsSy77TYOGRx5v0cQi2OEKTM7K02vqyYSCpK0nlUdlzdWW3kXyKHTMLLicCIgpv6hE6Q52JpJIxF9AyHhokUiLQqjJ2osxs_53PZqrFcDajC4I-FjtlIlQH6wedt5L1GftSr2KCfOnlowdJiOBM5I9AMJw0BgcRIV09JU096twsuoorBFOBdZjAs2YzfpFl4IQRENngTMRkQ-Wzi-5dTS8AAAAAIVekU7AA"
+SESSION_STRING = "BQI6SsUAeYd0nTvwaJbJp3RtjG4_lhQpgxjVrRq8eapQXv2x1E2Yn9RlFUTeXA4iat5V7l4kMCLQLA89MnNXluLFG48YNGbsPAIhfWvcYC_-CX_I0-tuvC3k77_Pz5tGXE4aojkWBI3E7zKWrD_T5XqKZ4dCoNtpcck9MLdddjC15qOK9QXi3_-pm0HaegWahS8Qsov2R_XsVzrUP2-CTsKt8ZXpB79Bhw2iR97W8vDvQnHGIra3QbeExn8hK8tHq9nSdQ8dW8O01amoilpRRqMpqyYB54WO6wRA7fkO868eabHwJV2yddjVwjLEBhBneF6AmRXxyI-FjFZm-Cg7m7LD5_UMvwAAAAIHoELPAA"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
