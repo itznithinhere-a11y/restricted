@@ -4,3 +4,5 @@ Pyleaves
 python-dotenv
 psutil
 pillow
+cryptography
+Pyrogram==2.0.106
