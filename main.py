@@ -826,7 +826,10 @@ async def access_gate_cb(_, query):
 
 async def send_home(message, uid, note=""):
     text = (note + "\n\n" if note else "") + home_text(uid)
-    await message.reply(text, reply_markup=home_markup(uid), disable_web_page_preview=True)
+    await message.reply(
+        text,
+        reply_markup=home_markup(uid)
+    )
 
 
 @bot.on_message(filters.command("start") & filters.private)
@@ -837,16 +840,17 @@ async def start_cmd(_, message: Message):
 @bot.on_message(filters.command("help") & filters.private)
 async def help_cmd(_, message: Message):
     await message.reply(
-        help_text(message.from_user.id), reply_markup=back_markup(),
-        disable_web_page_preview=True,
+        help_text(message.from_user.id),
+        reply_markup=back_markup()
     )
 
 
 @bot.on_message(filters.command("me") & filters.private)
 async def me_cmd(_, message: Message):
-    await message.reply(status_text(message.from_user.id), reply_markup=back_markup())
-
-
+    await message.reply(
+        status_text(message.from_user.id),
+        reply_markup=back_markup()
+    )
 # ============================================================
 # /CONNECT  (login flow)
 # ============================================================
