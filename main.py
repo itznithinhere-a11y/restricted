@@ -1,48 +1,74 @@
 # ============================================================
-#  MEDIA DOWNLOADER BOT  -  FINAL (multi-user, self-healing)
+#  MEDIA DOWNLOADER BOT  -  PRODUCTION (multi-user, self-healing)
 # ============================================================
 #  * Every user connects THEIR OWN account (own api_id/api_hash)
 #  * Live progress: percent, time left, speed, stop button
 #  * Auto retry + "Retry failed" / "Continue" button
 #  * Broadcast, Block/Unblock, Maintenance mode (owner)
-#  * Auto-restart: a supervisor restarts the bot if it crashes
-#    or hangs - you never need to restart it by hand.
+#  * Supervisor restarts the bot if it crashes or hangs
 #
 #  Run with:   python main.py
 # ============================================================
 
 import os
 import sys
+import signal
 import subprocess
 import time as _time
 
 RESTART_CODE = 42   # /restart  -> supervisor starts the bot again
-FATAL_CODE = 3      # bad token / revoked bot session -> do not loop
+FATAL_CODE = 3      # bad token / bad config -> do not loop
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
 def _supervisor():
     """Keeps the bot alive. Restarts it after a crash or a hang."""
     script = os.path.abspath(__file__)
+    state = {"child": None, "stopping": False, "stop_at": 0.0}
     crashes = 0
+
+    def _on_signal(signum, _frame):
+        state["stopping"] = True
+        state["stop_at"] = _time.time()
+        child = state["child"]
+        if child is not None and child.poll() is None:
+            try:
+                child.send_signal(signal.SIGTERM)
+            except Exception:
+                pass
+
+    try:
+        signal.signal(signal.SIGTERM, _on_signal)
+        signal.signal(signal.SIGINT, _on_signal)
+    except Exception:
+        pass
+
     print("🛡  Supervisor running - the bot restarts itself if it stops.")
     print("    Press Ctrl+C to stop everything.\n")
+
     while True:
         started = _time.time()
-        try:
-            code = subprocess.call([sys.executable, script, "--child"])
-        except KeyboardInterrupt:
-            print("Stopped.")
-            return
+        child = subprocess.Popen([sys.executable, script, "--child"], cwd=BASE_DIR)
+        state["child"] = child
 
-        if code == 0:
+        while True:
+            try:
+                code = child.wait(timeout=1)
+                break
+            except subprocess.TimeoutExpired:
+                if state["stopping"] and _time.time() - state["stop_at"] > 30:
+                    child.kill()
+
+        if state["stopping"] or code == 0:
+            print("Stopped.")
             return
 
         if code == FATAL_CODE:
             print(
-                "\n❌ Bot token / session is invalid.\n"
-                "   1) Delete the file  media_bot.session  (and media_bot.session-journal)\n"
-                "   2) Put the correct BOT_TOKEN, API_ID, API_HASH in config.py\n"
-                "   3) Run again."
+                "\n❌ Fatal error (bad BOT_TOKEN / API_ID / API_HASH / config).\n"
+                "   Read the message printed above, fix config.py, then run again.\n"
+                "   If the token changed, also delete media_bot.session*"
             )
             return
 
@@ -55,10 +81,11 @@ def _supervisor():
         crashes = crashes + 1 if _time.time() - started < 60 else 1
         delay = min(5 * crashes, 60)
         print(f"⚠️  Bot stopped (exit code {code}). Restarting in {delay}s ...")
-        try:
-            _time.sleep(delay)
-        except KeyboardInterrupt:
-            return
+        end = _time.time() + delay
+        while _time.time() < end:
+            if state["stopping"]:
+                return
+            _time.sleep(0.5)
 
 
 if __name__ == "__main__" and "--child" not in sys.argv:
@@ -76,6 +103,7 @@ import asyncio
 LOOP = asyncio.new_event_loop()
 asyncio.set_event_loop(LOOP)
 
+import itertools
 import re
 import shutil
 import sqlite3
@@ -87,6 +115,7 @@ import psutil
 from cryptography.fernet import Fernet, InvalidToken
 from pyleaves import Leaves
 
+import pyrogram.errors as _perr
 from pyrogram import Client, filters, idle
 from pyrogram.enums import ParseMode
 from pyrogram.errors import (
@@ -112,6 +141,47 @@ from pyrogram.types import (
     User,
 )
 
+
+# Newer Telegram channels have IDs below pyrogram's old limit (-1002147483647),
+# which raises "ValueError: Peer id invalid". Replace the check itself so it
+# works whatever the pyrogram version / attribute names are.
+import pyrogram.utils as _pyro_utils
+
+BUILD = "2026-10-04-c"
+
+
+def _get_peer_type(peer_id: int) -> str:
+    if peer_id < 0:
+        if -2147483647 <= peer_id:
+            return "chat"
+        if -1007852516352 <= peer_id < -1000000000000:
+            return "channel"
+    elif 0 < peer_id <= 999999999999:
+        return "user"
+    raise ValueError(f"Peer id invalid: {peer_id}")
+
+
+for _attr, _val in (("MIN_CHANNEL_ID", -1007852516352), ("MAX_USER_ID", 999999999999)):
+    if hasattr(_pyro_utils, _attr):
+        setattr(_pyro_utils, _attr, _val)
+_pyro_utils.get_peer_type = _get_peer_type
+
+
+def _E(name):
+    """Error class that may not exist in every pyrogram fork."""
+    return getattr(_perr, name, type(f"_Missing_{name}", (Exception,), {}))
+
+
+AuthKeyDuplicated = _E("AuthKeyDuplicated")
+AccessTokenInvalid = _E("AccessTokenInvalid")
+ChannelPrivate = _E("ChannelPrivate")
+ChannelInvalid = _E("ChannelInvalid")
+UsernameNotOccupied = _E("UsernameNotOccupied")
+UsernameInvalid = _E("UsernameInvalid")
+
+SESSION_DEAD = (Unauthorized, AuthKeyDuplicated)
+NO_ACCESS = (PeerIdInvalid, ChannelPrivate, ChannelInvalid, UsernameNotOccupied, UsernameInvalid)
+
 from helpers.utils import processMediaGroup, progressArgs, send_media
 from helpers.forward import check_forward_permission, resolve_forward_chat_id
 from helpers.files import (
@@ -134,31 +204,46 @@ from helpers.msg import (
 from config import PyroConf
 from logger import LOGGER
 
+START_TIME = time()
+
 
 # ============================================================
 # SETTINGS  (all optional in config.py - sane defaults here)
 # ============================================================
 
 def cfg(name, default):
-    return getattr(PyroConf, name, default)
+    value = getattr(PyroConf, name, default)
+    return default if value is None else value
 
 
 MAX_BDL_RANGE = cfg("MAX_BDL_RANGE", 500)
 MAX_CONCURRENT_DOWNLOADS = max(1, cfg("MAX_CONCURRENT_DOWNLOADS", 4))
 PER_USER_DOWNLOADS = max(1, cfg("PER_USER_DOWNLOADS", 2))
 FLOOD_WAIT_DELAY = max(0, cfg("FLOOD_WAIT_DELAY", 2))
-ITEM_RETRIES = max(0, cfg("ITEM_RETRIES", 2))            # auto retries per file
-ITEM_TIMEOUT = max(60, cfg("ITEM_TIMEOUT", 3600))        # one file max seconds
+ITEM_RETRIES = max(0, cfg("ITEM_RETRIES", 2))
+ITEM_TIMEOUT = max(60, cfg("ITEM_TIMEOUT", 3600))
 PROGRESS_EDIT_EVERY = max(2, cfg("PROGRESS_EDIT_EVERY", 4))
-MAX_USER_TASKS = max(1, cfg("MAX_USER_TASKS", 5))        # parallel single links
+MAX_USER_TASKS = max(1, cfg("MAX_USER_TASKS", 5))
 FLOOD_MAX_WAIT = cfg("FLOOD_MAX_WAIT", 600)
 LOGIN_TIMEOUT = 600
-IDLE_EVICT = 900                                         # drop idle user sessions
+IDLE_EVICT = 900
+BOT_START_TIME = cfg("BOT_START_TIME", START_TIME)
 
 LINE = "━━━━━━━━━━━━━━━━━━"
 
 # result codes of one download
-OK, SKIP, FAIL, RETRY, AUTH = "ok", "skip", "fail", "retry", "auth"
+OK, SKIP, FAIL, RETRY, AUTH, STOPPED = "ok", "skip", "fail", "retry", "auth", "stopped"
+
+
+def _require_config():
+    missing = [k for k in ("API_ID", "API_HASH", "BOT_TOKEN", "OWNER_ID")
+               if not getattr(PyroConf, k, None)]
+    if missing:
+        print(f"❌ config.py is missing: {', '.join(missing)}")
+        sys.exit(FATAL_CODE)
+
+
+_require_config()
 
 bot = Client(
     "media_bot",
@@ -173,14 +258,50 @@ bot = Client(
 
 
 # ============================================================
+# ENCRYPTION KEY  (must stay the SAME forever)
+# ============================================================
+
+def load_fernet() -> Fernet:
+    key = cfg("ENCRYPTION_KEY", "") or os.getenv("ENCRYPTION_KEY", "")
+    if key:
+        try:
+            return Fernet(key.encode() if isinstance(key, str) else key)
+        except Exception:
+            print(
+                "❌ ENCRYPTION_KEY in config.py is invalid.\n"
+                "   Make a valid one with:\n"
+                "   python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\"\n"
+                "   and paste it as a FIXED string in config.py."
+            )
+            sys.exit(FATAL_CODE)
+
+    # No key given: create one once and keep it in a file.
+    path = os.path.join(BASE_DIR, "encryption.key")
+    if os.path.exists(path):
+        with open(path, "rb") as f:
+            return Fernet(f.read().strip())
+    new_key = Fernet.generate_key()
+    with open(path, "wb") as f:
+        f.write(new_key)
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+    print(f"🔑 Created {path} - back this file up, it protects saved logins.")
+    return Fernet(new_key)
+
+
+# ============================================================
 # DATABASE  (users, members, settings)
 # ============================================================
 
-DB_PATH = os.getenv("DB_PATH", "users.db")
-fernet = Fernet(PyroConf.ENCRYPTION_KEY.encode())
+DB_PATH = os.getenv("DB_PATH") or os.path.join(BASE_DIR, "users.db")
+fernet = load_fernet()
 
-DB = sqlite3.connect(DB_PATH, check_same_thread=False, isolation_level=None)
+DB = sqlite3.connect(DB_PATH, check_same_thread=False, isolation_level=None, timeout=10)
 DB.execute("PRAGMA journal_mode=WAL")
+DB.execute("PRAGMA synchronous=NORMAL")
+DB.execute("PRAGMA busy_timeout=5000")
 
 
 def _enc(text: str) -> str:
@@ -213,6 +334,28 @@ def init_db():
         pass
 
 
+def check_key_health():
+    """Loud warning if ENCRYPTION_KEY changed since saved logins were made."""
+    row = DB.execute("SELECT value FROM settings WHERE key='key_check'").fetchone()
+    if row is None:
+        DB.execute("INSERT OR REPLACE INTO settings VALUES ('key_check', ?)", (_enc("ok"),))
+    else:
+        try:
+            _dec(row[0])
+        except InvalidToken:
+            LOGGER(__name__).error(
+                "ENCRYPTION_KEY IS DIFFERENT from the one used before! "
+                "Saved logins cannot be read - users must /connect again. "
+                "Put the ORIGINAL fixed key in config.py."
+            )
+    bad = 0
+    for (uid,) in DB.execute("SELECT user_id FROM users").fetchall():
+        if get_user(uid, quiet=True) is None:
+            bad += 1
+    if bad:
+        LOGGER(__name__).error(f"{bad} saved login(s) cannot be decrypted.")
+
+
 # ---- settings ----
 
 def get_setting(key, default=""):
@@ -230,15 +373,19 @@ def maintenance_on() -> bool:
 
 # ---- connected accounts ----
 
+_DEC_WARNED = set()
+
+
 def save_user(uid, api_id, api_hash, session):
     old = DB.execute("SELECT channel FROM users WHERE user_id=?", (uid,)).fetchone()
     DB.execute(
         "INSERT OR REPLACE INTO users VALUES (?,?,?,?,?,?)",
         (uid, api_id, _enc(api_hash), _enc(session), old[0] if old else None, time()),
     )
+    _DEC_WARNED.discard(uid)
 
 
-def get_user(uid) -> Optional[dict]:
+def get_user(uid, quiet=False) -> Optional[dict]:
     row = DB.execute(
         "SELECT api_id, api_hash, session, channel FROM users WHERE user_id=?", (uid,)
     ).fetchone()
@@ -252,14 +399,24 @@ def get_user(uid) -> Optional[dict]:
             "channel": row[3],
         }
     except InvalidToken:
-        LOGGER(__name__).error(f"Cannot decrypt session for {uid} (wrong key?)")
+        if not quiet and uid not in _DEC_WARNED:
+            _DEC_WARNED.add(uid)
+            LOGGER(__name__).error(
+                f"Cannot decrypt login of user {uid} - ENCRYPTION_KEY changed?"
+            )
         return None
 
 
 def user_status(uid):
-    """(connected, channel) - cheap, no decryption."""
-    row = DB.execute("SELECT channel FROM users WHERE user_id=?", (uid,)).fetchone()
-    return (True, row[0]) if row else (False, None)
+    """(connected, channel). A login that cannot be read counts as NOT connected,
+    so the screens never say 'connected' and then ask to connect again."""
+    row = get_user(uid)
+    return (True, row["channel"]) if row else (False, None)
+
+
+def has_unreadable_login(uid) -> bool:
+    row = DB.execute("SELECT 1 FROM users WHERE user_id=?", (uid,)).fetchone()
+    return bool(row) and get_user(uid, quiet=True) is None
 
 
 def set_channel(uid, channel: str):
@@ -354,23 +511,39 @@ CLIENT_LOCKS: Dict[int, asyncio.Lock] = {}
 USER_LAST_USED: Dict[int, float] = {}
 
 LOGIN: Dict[int, dict] = {}          # /connect in progress
-CHANNEL_WAIT: Dict[int, float] = {}  # waiting for channel id
-USER_TASKS: Dict[int, set] = {}      # running tasks per user
-JOBS: Dict[int, "Job"] = {}          # one batch job per user
-RETRY_STORE: Dict[int, dict] = {}    # items that can be retried / continued
-NOTICE_AT: Dict[int, float] = {}     # rate-limit "blocked/maintenance" notices
+LOGIN_LOCKS: Dict[int, asyncio.Lock] = {}
+CHANNEL_WAIT: Dict[int, float] = {}
+USER_TASKS: Dict[int, set] = {}
+JOBS: Dict[int, "Job"] = {}
+RETRY_STORE: Dict[int, dict] = {}
+NOTICE_AT: Dict[int, float] = {}
 
-PENDING_BC: Dict[int, dict] = {}     # broadcast waiting for confirmation
+PENDING_BC: Dict[int, dict] = {}
 BC = {"running": False, "stop": False}
 
 download_semaphore: Optional[asyncio.Semaphore] = None
 USER_SEMS: Dict[int, asyncio.Semaphore] = {}
+
+BG_TASKS: set = set()
+DL_IDS = itertools.count(1)          # unique temp folder per download
+
+
+def spawn(coro):
+    """create_task that keeps a strong reference (tasks can be garbage collected)."""
+    t = asyncio.create_task(coro)
+    BG_TASKS.add(t)
+    t.add_done_callback(BG_TASKS.discard)
+    return t
 
 
 def get_user_sem(uid) -> asyncio.Semaphore:
     if uid not in USER_SEMS:
         USER_SEMS[uid] = asyncio.Semaphore(PER_USER_DOWNLOADS)
     return USER_SEMS[uid]
+
+
+def login_lock(uid) -> asyncio.Lock:
+    return LOGIN_LOCKS.setdefault(uid, asyncio.Lock())
 
 
 def is_owner(uid) -> bool:
@@ -384,9 +557,11 @@ def is_allowed(uid) -> bool:
     return uid in allowed
 
 
-owner_only = filters.create(
-    lambda _, __, m: bool(getattr(m, "from_user", None)) and is_owner(m.from_user.id)
-)
+async def _owner_check(_, __, m):
+    return bool(getattr(m, "from_user", None)) and is_owner(m.from_user.id)
+
+
+owner_only = filters.create(_owner_check)
 
 
 # ============================================================
@@ -398,7 +573,8 @@ def title(t: str) -> str:
 
 
 def md_safe(s) -> str:
-    return re.sub(r"[*_`\[\]]", "", str(s or ""))
+    s = re.sub(r"[*_`\[\]~|]", "", str(s or ""))
+    return s.replace("--", "-")
 
 
 def short(e, n=120) -> str:
@@ -423,6 +599,20 @@ def bar(current, total, length=14) -> str:
     return "█" * filled + "░" * (length - filled)
 
 
+def fmt_channel(channel) -> str:
+    return f"`{channel}`" if channel else "⚠️ Not set"
+
+
+def explain_error(e) -> str:
+    if isinstance(e, NO_ACCESS):
+        return "No access to this chat – join it with your connected account"
+    if isinstance(e, FloodWait):
+        return f"Telegram rate limit – wait {fmt_time(getattr(e, 'value', 0) or 0)}"
+    if isinstance(e, SESSION_DEAD):
+        return "Your login expired – connect again"
+    return f"Telegram: {short(e)}"
+
+
 async def safe_delete(message):
     try:
         if message:
@@ -441,6 +631,14 @@ async def safe_edit(message, text, markup=None):
     except Exception:
         pass
     return False
+
+
+async def qanswer(query, text=None, alert=False):
+    """query.answer that never raises (old queries expire)."""
+    try:
+        await query.answer(text, show_alert=alert)
+    except Exception:
+        pass
 
 
 async def cleanup_file(path):
@@ -467,7 +665,17 @@ async def flood_call(fn, tries=3):
 def track_task(uid, coro):
     task = asyncio.create_task(coro)
     USER_TASKS.setdefault(uid, set()).add(task)
-    task.add_done_callback(lambda t: USER_TASKS.get(uid, set()).discard(t))
+
+    def _done(t):
+        s = USER_TASKS.get(uid)
+        if s is not None:
+            s.discard(t)
+            if not s:
+                USER_TASKS.pop(uid, None)
+        if not t.cancelled() and t.exception():
+            LOGGER(__name__).error(f"[{uid}] task crashed: {t.exception()!r}")
+
+    task.add_done_callback(_done)
     return task
 
 
@@ -475,6 +683,13 @@ def running_tasks(uid=None):
     if uid is not None:
         return [t for t in list(USER_TASKS.get(uid, ())) if not t.done()]
     return [t for s in list(USER_TASKS.values()) for t in list(s) if not t.done()]
+
+
+def _loop_exception_handler(loop, context):
+    LOGGER(__name__).error(f"Loop error: {context.get('message')} {context.get('exception')!r}")
+
+
+LOOP.set_exception_handler(_loop_exception_handler)
 
 
 # ============================================================
@@ -485,12 +700,26 @@ def _lock(uid) -> asyncio.Lock:
     return CLIENT_LOCKS.setdefault(uid, asyncio.Lock())
 
 
+async def _stop_quiet(client):
+    for fn in (client.stop, client.disconnect):
+        try:
+            await asyncio.wait_for(fn(), 15)
+            return
+        except Exception:
+            continue
+
+
 async def get_user_client(uid) -> Optional[Client]:
     async with _lock(uid):
         client = USER_CLIENTS.get(uid)
         if client and client.is_connected:
             USER_LAST_USED[uid] = time()
             return client
+        if client:
+            # Stale object: stop it first. Two live clients on the SAME session
+            # make Telegram kill the login (AuthKeyDuplicated).
+            USER_CLIENTS.pop(uid, None)
+            await _stop_quiet(client)
 
         row = get_user(uid)
         if not row:
@@ -509,10 +738,14 @@ async def get_user_client(uid) -> Optional[Client]:
         )
         try:
             await asyncio.wait_for(client.start(), 60)
-        except Unauthorized:
+        except SESSION_DEAD:
             LOGGER(__name__).warning(f"Session revoked for user {uid}")
+            await _stop_quiet(client)
             delete_user(uid)
             return None
+        except BaseException:
+            await _stop_quiet(client)
+            raise
 
         USER_CLIENTS[uid] = client
         USER_LAST_USED[uid] = time()
@@ -530,10 +763,35 @@ async def drop_user_client(uid, logout=False):
         else:
             await asyncio.wait_for(client.stop(), 30)
     except Exception:
+        await _stop_quiet(client)
+
+
+async def warm_peers(uc, force=False):
+    """A fresh in-memory session knows no chats. Load dialogs once so private
+    channel links (t.me/c/...) can be resolved."""
+    last = getattr(uc, "_peers_warm", 0)
+    if not force and time() - last < 600:
+        return
+    try:
+        count = 0
+        async for _ in uc.get_dialogs(limit=300):
+            count += 1
+    except FloodWait:
+        pass
+    except Exception as e:
+        LOGGER(__name__).warning(f"warm_peers failed: {type(e).__name__}")
+    uc._peers_warm = time()
+
+
+async def get_messages_safe(uc, chat, ids):
+    try:
+        return await flood_call(lambda: uc.get_messages(chat_id=chat, message_ids=ids))
+    except (PeerIdInvalid, KeyError, ValueError):
+        await warm_peers(uc, force=True)
         try:
-            await asyncio.wait_for(client.stop(), 15)
-        except Exception:
-            pass
+            return await flood_call(lambda: uc.get_messages(chat_id=chat, message_ids=ids))
+        except (KeyError, ValueError):
+            raise PeerIdInvalid("chat not reachable")
 
 
 # ============================================================
@@ -565,7 +823,7 @@ async def resolve_and_check_target(client, raw_channel_id: str):
     if parsed is None:
         return None, "Invalid channel ID / username."
     try:
-        resolved = await resolve_forward_chat_id(parsed)
+        resolved = await asyncio.wait_for(resolve_forward_chat_id(parsed), 30)
     except Exception as e:
         return None, f"Could not read the channel: {short(e)}"
     try:
@@ -587,15 +845,21 @@ async def prepare(client, message, uid):
     row = get_user(uid)
 
     if not row:
-        await message.reply(
-            "🔗 **Connect your account first.**\n\nUse /connect (or tap Connect on /start)."
-        )
+        if has_unreadable_login(uid):
+            await message.reply(
+                "🔒 **Your saved login cannot be read anymore.**\n\n"
+                "Please connect again with /connect."
+            )
+        else:
+            await message.reply(
+                "🔗 **Connect your account first.**\n\nUse /connect (or tap Connect on /start)."
+            )
         return None
 
     if not row["channel"]:
         await message.reply(
             "📡 **Set your channel first.**\n\n"
-            "Use /setchannel — the bot must be admin there with *Post Messages*."
+            "Use /setchannel — the bot must be admin there with __Post Messages__."
         )
         return None
 
@@ -609,7 +873,7 @@ async def prepare(client, message, uid):
     try:
         uc = await get_user_client(uid)
     except Exception as e:
-        LOGGER(__name__).warning(f"[{uid}] client start failed: {e}")
+        LOGGER(__name__).warning(f"[{uid}] client start failed: {type(e).__name__}: {e}")
         await message.reply(
             "⚠️ **Could not connect to your account right now.**\n\nPlease try again in a minute."
         )
@@ -636,7 +900,7 @@ def home_text(uid) -> str:
     t = title("⚡ Media Downloader")
     t += f"👤 **Account:**  {'✅ Connected' if connected else '❌ Not connected'}\n"
     if connected:
-        t += f"📡 **Channel:**  {('`' + str(channel) + '`') if channel else '⚠️ Not set'}\n"
+        t += f"📡 **Channel:**  {fmt_channel(channel)}\n"
     if job:
         t += f"⚙️ **Running:**  {job.label} ({job.done}/{job.total})\n"
     elif n:
@@ -644,7 +908,10 @@ def home_text(uid) -> str:
     t += "\n"
 
     if not connected:
-        t += "👉 **Next step:** tap **Connect Account**."
+        if has_unreadable_login(uid):
+            t += "⚠️ Your old login could not be read. Tap **Connect Account** to link again."
+        else:
+            t += "👉 **Next step:** tap **Connect Account**."
     elif not channel:
         t += "👉 **Next step:** tap **Set Channel**."
     else:
@@ -724,7 +991,7 @@ def status_text(uid) -> str:
     t = title("📊 My Status")
     t += f"👤 **Account:**  {'✅ Connected' if connected else '❌ Not connected'}\n"
     if connected:
-        t += f"📡 **Channel:**  {('`' + str(channel) + '`') if channel else '⚠️ Not set'}\n"
+        t += f"📡 **Channel:**  {fmt_channel(channel)}\n"
     job = JOBS.get(uid)
     if job:
         t += f"⚙️ **Job:**  {job.label} – {job.done}/{job.total} done\n"
@@ -762,11 +1029,11 @@ GUIDE_STORY = (
 CONNECT_INTRO = (
     title("🔗 Connect Account")
     + "**Please read first**\n"
-    "This links *your* Telegram account so the bot can read chats you "
+    "This links __your__ Telegram account so the bot can read chats you "
     "already have access to. Your login is stored **encrypted** and "
     "removed when you tap Disconnect. Continue only if you trust this bot's owner.\n\n"
     "**Step 1 of 4 – API ID**\n"
-    "Open https://my.telegram.org → *API development tools* and send "
+    "Open https://my.telegram.org → __API development tools__ and send "
     "your **API ID** (numbers only)."
 )
 
@@ -816,7 +1083,7 @@ async def access_gate(_, message: Message):
 async def access_gate_cb(_, query):
     reason = _gate_reason(query.from_user.id)
     if reason:
-        await query.answer(re.sub(r"[*`]", "", reason)[:180], show_alert=True)
+        await qanswer(query, re.sub(r"[*`_]", "", reason)[:180], alert=True)
         query.stop_propagation()
 
 
@@ -826,10 +1093,7 @@ async def access_gate_cb(_, query):
 
 async def send_home(message, uid, note=""):
     text = (note + "\n\n" if note else "") + home_text(uid)
-    await message.reply(
-        text,
-        reply_markup=home_markup(uid)
-    )
+    await message.reply(text, reply_markup=home_markup(uid), disable_web_page_preview=True)
 
 
 @bot.on_message(filters.command("start") & filters.private)
@@ -840,35 +1104,38 @@ async def start_cmd(_, message: Message):
 @bot.on_message(filters.command("help") & filters.private)
 async def help_cmd(_, message: Message):
     await message.reply(
-        help_text(message.from_user.id),
-        reply_markup=back_markup()
+        help_text(message.from_user.id), reply_markup=back_markup(),
+        disable_web_page_preview=True,
     )
 
 
 @bot.on_message(filters.command("me") & filters.private)
 async def me_cmd(_, message: Message):
-    await message.reply(
-        status_text(message.from_user.id),
-        reply_markup=back_markup()
-    )
+    await message.reply(status_text(message.from_user.id), reply_markup=back_markup())
+
+
 # ============================================================
 # /CONNECT  (login flow)
 # ============================================================
 
-async def _end_login(uid):
-    state = LOGIN.pop(uid, None)
-    if state and state.get("client"):
+async def _disc_temp(state):
+    temp = state.pop("client", None)
+    if temp:
         try:
-            await state["client"].disconnect()
+            await asyncio.wait_for(temp.disconnect(), 15)
         except Exception:
             pass
 
 
+async def _end_login(uid):
+    state = LOGIN.pop(uid, None)
+    if state:
+        await _disc_temp(state)
+
+
 async def start_connect(uid, message):
     if user_status(uid)[0]:
-        await message.reply(
-            "✅ **Already connected.**\n\nTap Disconnect on /start first to link another account."
-        )
+        await send_home(message, uid, "✅ **Already connected.**")
         return
     await _end_login(uid)
     CHANNEL_WAIT.pop(uid, None)
@@ -902,18 +1169,13 @@ async def cancel_cmd(_, message: Message):
         await message.reply("ℹ️ Nothing to cancel.")
 
 
-async def _temp_fail(uid, temp):
-    await _end_login(uid)
-    try:
-        await temp.disconnect()
-    except Exception:
-        pass
-
-
 async def login_step(client, message: Message):
     uid = message.from_user.id
-    state = LOGIN[uid]
-    text = (message.text or "").strip()
+    state = LOGIN.get(uid)
+    if not state:
+        return
+    raw = message.text or ""
+    text = raw.strip()
 
     if time() - state["ts"] > LOGIN_TIMEOUT:
         await _end_login(uid)
@@ -922,6 +1184,7 @@ async def login_step(client, message: Message):
     state["ts"] = time()
     step = state["step"]
 
+    # ---- 1. API ID ----
     if step == "api_id":
         if not text.isdigit():
             await message.reply("❌ API ID must be numbers only. Send it again.")
@@ -931,10 +1194,11 @@ async def login_step(client, message: Message):
         await message.reply(
             "**Step 2 of 4 – API hash**\n"
             "Send your **API hash** (32 letters/numbers).\n"
-            "_Your message is deleted right after._"
+            "__Your message is deleted right after.__"
         )
         return
 
+    # ---- 2. API hash ----
     if step == "api_hash":
         await safe_delete(message)
         if not re.fullmatch(r"[0-9a-fA-F]{32}", text):
@@ -948,38 +1212,44 @@ async def login_step(client, message: Message):
         )
         return
 
+    # ---- 3. phone ----
     if step == "phone":
-        phone = text.replace(" ", "")
+        phone = re.sub(r"[^\d+]", "", text)
+        digits = re.sub(r"\D", "", phone)
+        if len(digits) < 7:
+            await message.reply("❌ Invalid phone number. Send it again with country code.")
+            return
+        if not phone.startswith("+"):
+            phone = "+" + digits
+
+        await _disc_temp(state)
         temp = Client(
             f"login_{uid}", api_id=state["api_id"], api_hash=state["api_hash"],
             in_memory=True, no_updates=True,
         )
+        state["client"] = temp
         try:
             await asyncio.wait_for(temp.connect(), 30)
             sent = await asyncio.wait_for(temp.send_code(phone), 30)
         except ApiIdInvalid:
-            await _temp_fail(uid, temp)
+            await _end_login(uid)
             await message.reply("❌ **API ID / API hash do not match.** Run /connect and try again.")
             return
         except PhoneNumberInvalid:
-            try:
-                await temp.disconnect()
-            except Exception:
-                pass
+            await _disc_temp(state)
             await message.reply("❌ Invalid phone number. Send it again with country code.")
             return
         except FloodWait as e:
-            await _temp_fail(uid, temp)
+            await _end_login(uid)
             await message.reply(f"⏳ Telegram says wait **{fmt_time(e.value)}**. Try /connect later.")
             return
         except Exception as e:
-            LOGGER(__name__).error(f"send_code failed for {uid}: {type(e).__name__}")
-            await _temp_fail(uid, temp)
+            LOGGER(__name__).error(f"send_code failed for {uid}: {type(e).__name__}: {e}")
+            await _end_login(uid)
             await message.reply(f"⚠️ Could not send the code: {short(e)}\n\nTry /connect again.")
             return
 
-        state.update(client=temp, phone=phone,
-                     phone_code_hash=sent.phone_code_hash, step="code")
+        state.update(phone=phone, phone_code_hash=sent.phone_code_hash, step="code")
         await message.reply(
             "**Step 4 of 4 – Login code**\n"
             "Telegram sent you a code.\n\n"
@@ -988,17 +1258,27 @@ async def login_step(client, message: Message):
         )
         return
 
+    # ---- 4. code ----
     if step == "code":
         await safe_delete(message)
+        temp = state.get("client")
+        if not temp:
+            await _end_login(uid)
+            await message.reply("⚠️ Login state lost. Run /connect again.")
+            return
         code = re.sub(r"\D", "", text)
-        temp: Client = state["client"]
+        if not code:
+            await message.reply("❌ Send the code (digits, with spaces).")
+            return
         try:
-            result = await temp.sign_in(state["phone"], state["phone_code_hash"], code)
+            result = await asyncio.wait_for(
+                temp.sign_in(state["phone"], state["phone_code_hash"], code), 30
+            )
         except SessionPasswordNeeded:
             state["step"] = "password"
             await message.reply(
                 "🔐 **Two-step verification is on.**\n"
-                "Send your 2FA password.\n_Your message is deleted right after._"
+                "Send your 2FA password.\n__Your message is deleted right after.__"
             )
             return
         except PhoneCodeInvalid:
@@ -1008,24 +1288,37 @@ async def login_step(client, message: Message):
             await _end_login(uid)
             await message.reply("⌛ Code expired. Run /connect again.")
             return
+        except FloodWait as e:
+            await _end_login(uid)
+            await message.reply(f"⏳ Telegram says wait **{fmt_time(e.value)}**. Try /connect later.")
+            return
         except Exception as e:
-            LOGGER(__name__).error(f"sign_in failed for {uid}: {type(e).__name__}")
+            LOGGER(__name__).error(f"sign_in failed for {uid}: {type(e).__name__}: {e}")
             await _end_login(uid)
             await message.reply(f"⚠️ Login failed: {short(e)}\n\nTry /connect again.")
             return
         await _finish_login(uid, message, result)
         return
 
+    # ---- 5. 2FA password ----
     if step == "password":
         await safe_delete(message)
-        temp: Client = state["client"]
+        temp = state.get("client")
+        if not temp:
+            await _end_login(uid)
+            await message.reply("⚠️ Login state lost. Run /connect again.")
+            return
         try:
-            result = await temp.check_password(text)
+            result = await asyncio.wait_for(temp.check_password(raw), 30)
         except PasswordHashInvalid:
             await message.reply("❌ Wrong password. Send it again.")
             return
+        except FloodWait as e:
+            await _end_login(uid)
+            await message.reply(f"⏳ Telegram says wait **{fmt_time(e.value)}**. Try /connect later.")
+            return
         except Exception as e:
-            LOGGER(__name__).error(f"check_password failed for {uid}: {type(e).__name__}")
+            LOGGER(__name__).error(f"check_password failed for {uid}: {type(e).__name__}: {e}")
             await _end_login(uid)
             await message.reply(f"⚠️ Login failed: {short(e)}\n\nTry /connect again.")
             return
@@ -1034,6 +1327,10 @@ async def login_step(client, message: Message):
 
 async def _finish_login(uid, message, result):
     state = LOGIN.get(uid)
+    if not state or not state.get("client"):
+        await _end_login(uid)
+        await message.reply("⚠️ Login state lost. Run /connect again.")
+        return
     temp: Client = state["client"]
 
     if not isinstance(result, User):
@@ -1047,11 +1344,13 @@ async def _finish_login(uid, message, result):
         session = await temp.export_session_string()
         save_user(uid, state["api_id"], state["api_hash"], session)
     except Exception as e:
-        LOGGER(__name__).error(f"Saving session failed for {uid}: {type(e).__name__}")
+        LOGGER(__name__).error(f"Saving session failed for {uid}: {type(e).__name__}: {e}")
         await _end_login(uid)
         await message.reply("⚠️ Could not save your login. Try /connect again.")
         return
 
+    # make sure no old live client uses a previous session of this user
+    await drop_user_client(uid)
     await _end_login(uid)
     LOGGER(__name__).info(f"User {uid} connected.")
     await send_home(
@@ -1085,6 +1384,7 @@ async def do_disconnect(uid):
     delete_user(uid)
     RETRY_STORE.pop(uid, None)
     CHANNEL_WAIT.pop(uid, None)
+    USER_SEMS.pop(uid, None)
     await _end_login(uid)
 
 
@@ -1100,7 +1400,9 @@ CONFIRM_DISCONNECT = (
 
 @bot.on_message(filters.command("disconnect") & filters.private)
 async def disconnect_cmd(_, message: Message):
-    if not user_status(message.from_user.id)[0]:
+    uid = message.from_user.id
+    row = DB.execute("SELECT 1 FROM users WHERE user_id=?", (uid,)).fetchone()
+    if not row:
         await message.reply("ℹ️ You are not connected.")
         return
     await message.reply(
@@ -1138,7 +1440,7 @@ async def ask_channel(message, uid):
         title("📡 Set Channel")
         + "Send the channel **ID** or **@username**.\n\n"
         "Examples:\n`-1001234567890`\n`@mychannel`\n\n"
-        "The bot must be **admin** there with *Post Messages*.\n"
+        "The bot must be **admin** there with __Post Messages__.\n"
         "Send /cancel to stop."
     )
 
@@ -1160,18 +1462,6 @@ async def setchannel_cmd(client, message: Message):
 # Each returns (status, reason)
 # ============================================================
 
-async def handle_download(client, message, post_url, forward_chat_id, uc, uid):
-    try:
-        async with download_semaphore, get_user_sem(uid):
-            return await _download_post(client, message, post_url, forward_chat_id, uc, uid)
-    except FloodWait as e:
-        wait = int(getattr(e, "value", 0) or 0)
-        if wait > FLOOD_MAX_WAIT:
-            return FAIL, f"Telegram asked to wait {fmt_time(wait)} – try later"
-        await asyncio.sleep(wait + 1)   # semaphore is already released here
-        return RETRY, f"Telegram rate limit ({wait}s)"
-
-
 async def _download_post(client, message, post_url, forward_chat_id, uc, uid):
     media_path = None
     progress_message = None
@@ -1182,7 +1472,7 @@ async def _download_post(client, message, post_url, forward_chat_id, uc, uid):
     try:
         chat_id, message_id = getChatMsgID(post_url)
 
-        chat_message = await uc.get_messages(chat_id=chat_id, message_ids=message_id)
+        chat_message = await get_messages_safe(uc, chat_id, message_id)
 
         if not chat_message or getattr(chat_message, "empty", False):
             return FAIL, "Message not found (deleted or no access)"
@@ -1227,7 +1517,7 @@ async def _download_post(client, message, post_url, forward_chat_id, uc, uid):
             )
 
             filename = get_file_name(message_id, chat_message)
-            download_path = get_download_path(message.id, filename)
+            download_path = get_download_path(next(DL_IDS), filename)
 
             media_path = await chat_message.download(
                 file_name=download_path,
@@ -1270,6 +1560,8 @@ async def _download_post(client, message, post_url, forward_chat_id, uc, uid):
                 await client.send_message(
                     chat_id=forward_chat_id, text=text, entities=entities or None
                 )
+            except FloodWait:
+                raise
             except BadRequest as e:
                 if "ENTITY_TEXT_INVALID" not in str(e):
                     raise
@@ -1282,9 +1574,9 @@ async def _download_post(client, message, post_url, forward_chat_id, uc, uid):
         raise
     except FloodWait:
         raise
-    except PeerIdInvalid:
+    except NO_ACCESS:
         return FAIL, "No access to this chat – join it with your connected account"
-    except Unauthorized:
+    except SESSION_DEAD:
         delete_user(uid)
         await drop_user_client(uid)
         return AUTH, "Your login expired – connect again"
@@ -1302,18 +1594,6 @@ async def _download_post(client, message, post_url, forward_chat_id, uc, uid):
             await safe_delete(progress_message)
 
 
-async def handle_story_download(client, message, story_url, forward_chat_id, uc, uid):
-    try:
-        async with download_semaphore, get_user_sem(uid):
-            return await _download_story(client, message, story_url, forward_chat_id, uc, uid)
-    except FloodWait as e:
-        wait = int(getattr(e, "value", 0) or 0)
-        if wait > FLOOD_MAX_WAIT:
-            return FAIL, f"Telegram asked to wait {fmt_time(wait)} – try later"
-        await asyncio.sleep(wait + 1)
-        return RETRY, f"Telegram rate limit ({wait}s)"
-
-
 async def _download_story(client, message, story_url, forward_chat_id, uc, uid):
     media_path = None
     progress_message = None
@@ -1323,7 +1603,11 @@ async def _download_story(client, message, story_url, forward_chat_id, uc, uid):
 
     try:
         chat_username, story_id = getStoryChatMsgID(story_url)
-        story = await uc.get_stories(chat_id=chat_username, story_ids=story_id)
+        try:
+            story = await uc.get_stories(chat_id=chat_username, story_ids=story_id)
+        except (PeerIdInvalid, KeyError):
+            await warm_peers(uc, force=True)
+            story = await uc.get_stories(chat_id=chat_username, story_ids=story_id)
 
         if not story:
             return FAIL, "Story not found (expired, deleted or no access)"
@@ -1346,7 +1630,7 @@ async def _download_story(client, message, story_url, forward_chat_id, uc, uid):
         )
 
         filename = get_story_file_name(story_id, story, chat_username)
-        download_path = get_download_path(message.id, filename)
+        download_path = get_download_path(next(DL_IDS), filename)
 
         media_path = await story.download(
             file_name=download_path,
@@ -1372,9 +1656,9 @@ async def _download_story(client, message, story_url, forward_chat_id, uc, uid):
         raise
     except FloodWait:
         raise
-    except PeerIdInvalid:
+    except NO_ACCESS:
         return FAIL, "No access to this user's stories"
-    except Unauthorized:
+    except SESSION_DEAD:
         delete_user(uid)
         await drop_user_client(uid)
         return AUTH, "Your login expired – connect again"
@@ -1392,22 +1676,38 @@ async def _download_story(client, message, story_url, forward_chat_id, uc, uid):
             await safe_delete(progress_message)
 
 
-HANDLERS = {"post": handle_download, "story": handle_story_download}
+HANDLERS = {"post": _download_post, "story": _download_story}
+
+
+async def guarded(kind, client, message, url, target, uc, uid):
+    """Slots + timeout around one item.
+    The per-user slot is taken FIRST, so one user's queue can never hog
+    all global slots; the timeout only counts real work, not waiting."""
+    fn = HANDLERS[kind]
+    try:
+        async with get_user_sem(uid):
+            async with download_semaphore:
+                try:
+                    return await asyncio.wait_for(
+                        fn(client, message, url, target, uc, uid), ITEM_TIMEOUT
+                    )
+                except asyncio.TimeoutError:
+                    return RETRY, "Timed out"
+    except FloodWait as e:
+        wait = int(getattr(e, "value", 0) or 0)
+        if wait > FLOOD_MAX_WAIT:
+            return FAIL, f"Telegram asked to wait {fmt_time(wait)} – try later"
+        await asyncio.sleep(wait + 1)   # slots are already released here
+        return RETRY, f"Telegram rate limit ({wait}s)"
 
 
 async def run_with_retries(kind, client, message, url, target, uc, uid, stop_check=None):
-    """Runs one item with timeout + automatic retries. Returns (status, reason)."""
-    handler = HANDLERS[kind]
+    """Runs one item with automatic retries. Returns (status, reason)."""
     status, reason = RETRY, ""
     for attempt in range(ITEM_RETRIES + 1):
         if stop_check and stop_check():
-            break
-        try:
-            status, reason = await asyncio.wait_for(
-                handler(client, message, url, target, uc, uid), ITEM_TIMEOUT
-            )
-        except asyncio.TimeoutError:
-            status, reason = RETRY, "Timed out"
+            return STOPPED, ""
+        status, reason = await guarded(kind, client, message, url, target, uc, uid)
         if status != RETRY:
             break
         if attempt < ITEM_RETRIES:
@@ -1420,19 +1720,28 @@ async def run_with_retries(kind, client, message, url, target, uc, uid, stop_che
 # ============================================================
 
 async def run_single(client, message, uc, target, uid, kind, url):
-    status, reason = await run_with_retries(kind, client, message, url, target, uc, uid)
-    if status == OK:
-        return
-    if status == SKIP:
-        await message.reply(f"ℹ️ {md_safe(reason)}")
-    elif status == AUTH:
-        await message.reply(f"🔒 **{md_safe(reason)}**\n\nUse /connect to log in again.")
-    elif status == RETRY:
-        await message.reply(
-            f"❌ **Failed after several tries.**\n{md_safe(reason)}\n\nPlease try again later."
-        )
-    else:
-        await message.reply(f"❌ **Failed.**\n{md_safe(reason)}")
+    try:
+        status, reason = await run_with_retries(kind, client, message, url, target, uc, uid)
+        if status == OK:
+            return
+        if status == SKIP:
+            await message.reply(f"ℹ️ {md_safe(reason)}")
+        elif status == AUTH:
+            await message.reply(f"🔒 **{md_safe(reason)}**\n\nUse /connect to log in again.")
+        elif status == RETRY:
+            await message.reply(
+                f"❌ **Failed after several tries.**\n{md_safe(reason)}\n\nPlease try again later."
+            )
+        else:
+            await message.reply(f"❌ **Failed.**\n{md_safe(reason)}")
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        LOGGER(__name__).exception(f"[{uid}] single download crashed")
+        try:
+            await message.reply(f"⚠️ **Something went wrong.**\n{short(e)}")
+        except Exception:
+            pass
 
 
 async def start_single(client, message, uid, kind, url):
@@ -1491,6 +1800,7 @@ class Job:
         self.runner = None
         self.workers = []
         self.fatal = None
+        self.error = None
 
 
 def stop_markup():
@@ -1549,7 +1859,7 @@ async def scan_posts(uc, chat, first_id, last_id, job: Job):
         if job.stop:
             break
         chunk = ids[i:i + 100]
-        msgs = await flood_call(lambda: uc.get_messages(chat_id=chat, message_ids=chunk))
+        msgs = await get_messages_safe(uc, chat, chunk)
         if not isinstance(msgs, list):
             msgs = [msgs]
         for m in msgs:
@@ -1584,11 +1894,21 @@ async def run_items(client, message, uc, target, job: Job, ids, prefix):
                 return
             job.current = item
             job.inflight.add(item)
-            status, reason = await run_with_retries(
-                job.kind, client, message, f"{prefix}/{item}", target, uc, job.uid,
-                stop_check=lambda: job.stop,
-            )
-            job.inflight.discard(item)     # not reached when cancelled
+            try:
+                status, reason = await run_with_retries(
+                    job.kind, client, message, f"{prefix}/{item}", target, uc, job.uid,
+                    stop_check=lambda: job.stop,
+                )
+            except asyncio.CancelledError:
+                raise                      # item stays in inflight -> can be continued
+            except Exception as e:
+                LOGGER(__name__).exception(f"[{job.uid}] worker error on {item}")
+                status, reason = RETRY, f"Unexpected error: {short(e, 80)}"
+
+            if status == STOPPED:
+                return                     # item stays in inflight -> can be continued
+
+            job.inflight.discard(item)
             job.done += 1
             if status == OK:
                 job.ok += 1
@@ -1618,6 +1938,8 @@ def finish_text(job: Job, left_count: int) -> str:
     elapsed = fmt_time(time() - job.started)
     if job.fatal:
         head = "⚠️ Stopped – login expired"
+    elif job.error:
+        head = "⚠️ Stopped – error"
     elif job.stop:
         head = "🛑 Stopped"
     elif job.failed:
@@ -1635,6 +1957,8 @@ def finish_text(job: Job, left_count: int) -> str:
         t += f"⏸ Not done:  {left_count}\n"
     t += f"⏱ **Time:**  {elapsed}\n"
 
+    if job.error:
+        t += f"\n⚠️ {md_safe(job.error)}\n"
     if job.failures:
         t += "\n**Why some failed**\n"
         for reason, n in Counter(r for _, r, _ in job.failures).most_common(4):
@@ -1653,6 +1977,8 @@ async def batch_runner(client, message, uc, target, job: Job, prefix, ids, scan)
             chat, first_id, last_id = scan
             ids, skipped = await scan_posts(uc, chat, first_id, last_id, job)
             job.skipped = skipped
+            if job.stop:                   # stopped while checking -> nothing started
+                ids = []
 
         job.phase = "run"
         job.total = len(ids)
@@ -1661,20 +1987,24 @@ async def batch_runner(client, message, uc, target, job: Job, prefix, ids, scan)
         if ids and not job.stop:
             left = await run_items(client, message, uc, target, job, ids, prefix)
         elif ids:
-            left = list(ids)      # stopped before start -> can be continued
+            left = list(ids)
     except asyncio.CancelledError:
         job.stop = True
+    except SESSION_DEAD:
+        delete_user(uid)
+        await drop_user_client(uid)
+        job.stop = True
+        job.fatal = "Your login expired – connect again"
     except Exception as e:
         LOGGER(__name__).exception(f"[{uid}] batch crashed")
         job.stop = True
-        job.fatal = None
-        await message.reply(f"⚠️ **Batch stopped by an error.**\n{short(e)}")
+        job.error = explain_error(e)
     finally:
         updater.cancel()
-        JOBS.pop(uid, None) if JOBS.get(uid) is job else None
+        if JOBS.get(uid) is job:
+            JOBS.pop(uid, None)
 
-    # what can be retried / continued
-    retry_ids = {i for i, _, st in job.failures if st == RETRY}
+    retry_ids = {i for i, _, st in job.failures if st in (RETRY, AUTH)}
     retry_ids.update(left)
     markup = None
     if retry_ids:
@@ -1836,7 +2166,7 @@ def admin_text() -> str:
     t += f"🚫 **Blocked:**  {c['banned']}\n"
     t += f"⚙️ **Running:**  {len(JOBS)} batch · {len(running_tasks())} task(s)\n"
     t += f"🛠 **Maintenance:**  {'🔴 ON' if maintenance_on() else '🟢 OFF'}\n"
-    t += f"⏱ **Uptime:**  {fmt_time(time() - PyroConf.BOT_START_TIME)}\n"
+    t += f"⏱ **Uptime:**  {fmt_time(time() - BOT_START_TIME)}\n"
     return t
 
 
@@ -1890,14 +2220,14 @@ def banned_text() -> str:
 
 
 def system_stats_text() -> str:
-    d_total, d_used, d_free = shutil.disk_usage(".")
+    d_total, d_used, d_free = shutil.disk_usage(BASE_DIR)
     proc = psutil.Process(os.getpid())
     net = psutil.net_io_counters()
     c = member_counts()
     return (
         title("📊 System Stats")
         + "**Bot**\n"
-        f"├ Uptime: {fmt_time(time() - PyroConf.BOT_START_TIME)}\n"
+        f"├ Uptime: {fmt_time(time() - BOT_START_TIME)}\n"
         f"├ Users: {c['members']} (connected {c['connected']})\n"
         f"├ Live sessions: {len(USER_CLIENTS)}\n"
         f"├ Batches: {len(JOBS)}\n"
@@ -1917,6 +2247,10 @@ def system_stats_text() -> str:
         f"├ Per user: {PER_USER_DOWNLOADS}\n"
         f"└ Batch max: {MAX_BDL_RANGE}"
     )
+
+
+async def stats_text_async() -> str:
+    return await asyncio.to_thread(system_stats_text)   # does not block the bot
 
 
 @bot.on_message(filters.command("admin") & filters.private & owner_only)
@@ -1939,7 +2273,7 @@ async def stats_cmd(_, message: Message):
     uid = message.from_user.id
     if is_owner(uid):
         try:
-            await message.reply(system_stats_text(), reply_markup=admin_back())
+            await message.reply(await stats_text_async(), reply_markup=admin_back())
         except Exception:
             LOGGER(__name__).exception("stats")
             await message.reply("❌ Could not read system stats.")
@@ -2009,11 +2343,14 @@ async def maintenance_cmd(_, message: Message):
 
 @bot.on_message(filters.command("logs") & filters.private & owner_only)
 async def logs_cmd(_, message: Message):
-    if not os.path.exists("logs.txt"):
+    path = os.path.join(BASE_DIR, "logs.txt")
+    if not os.path.exists(path):
+        path = "logs.txt"
+    if not os.path.exists(path):
         await message.reply("ℹ️ No log file found.")
         return
     try:
-        await message.reply_document(document="logs.txt", caption="📜 **Bot logs**")
+        await message.reply_document(document=path, caption="📜 **Bot logs**")
     except Exception:
         await message.reply("❌ Could not send the log file.")
 
@@ -2047,7 +2384,7 @@ async def do_restart():
 @bot.on_message(filters.command("restart") & filters.private & owner_only)
 async def restart_cmd(_, message: Message):
     await message.reply("🔄 **Restarting...** Back in a few seconds.")
-    asyncio.create_task(do_restart())
+    spawn(do_restart())
 
 
 # ============================================================
@@ -2060,6 +2397,8 @@ async def send_payload(client, chat_id, p):
     else:
         try:
             await client.send_message(chat_id, p["text"], disable_web_page_preview=True)
+        except FloodWait:
+            raise
         except BadRequest:
             await client.send_message(
                 chat_id, p["text"], parse_mode=ParseMode.DISABLED,
@@ -2186,42 +2525,59 @@ async def callbacks(client, query):
     data = query.data or ""
     uid = query.from_user.id
     msg = query.message
+    answered = False
+
+    async def ack(text=None, alert=False):
+        nonlocal answered
+        if not answered:
+            answered = True
+            await qanswer(query, text, alert)
 
     try:
-        # answer fast so Telegram never shows a stuck spinner
-        if not (data.startswith(("adm_", "bc_")) or data in ("job_stop", "job_retry")):
-            await query.answer()
-
         # ------------ user screens ------------
         if data == "menu_home":
+            await ack()
             await safe_edit(msg, home_text(uid), home_markup(uid))
 
         elif data == "menu_help":
+            await ack()
             await safe_edit(msg, help_text(uid), back_markup())
 
         elif data == "menu_single":
+            await ack()
             await safe_edit(msg, GUIDE_SINGLE, back_markup())
 
         elif data == "menu_batch":
+            await ack()
             await safe_edit(msg, GUIDE_BATCH, back_markup())
 
         elif data == "menu_story":
+            await ack()
             await safe_edit(msg, GUIDE_STORY, back_markup())
 
         elif data == "menu_status":
+            await ack()
             await safe_edit(msg, status_text(uid), back_markup())
 
         elif data == "menu_connect":
-            await start_connect(uid, msg)
+            await ack()
+            if user_status(uid)[0]:
+                # stale button: just refresh this screen instead of asking again
+                await safe_edit(msg, home_text(uid), home_markup(uid))
+            else:
+                await start_connect(uid, msg)
 
         elif data == "login_cancel":
+            await ack()
             await _end_login(uid)
             await safe_edit(msg, home_text(uid), home_markup(uid))
 
         elif data == "menu_channel":
+            await ack()
             await ask_channel(msg, uid)
 
         elif data == "menu_disconnect":
+            await ack()
             await safe_edit(
                 msg, CONFIRM_DISCONNECT,
                 Markup([[Btn("✅ Yes, disconnect", callback_data="disc_yes"),
@@ -2229,6 +2585,7 @@ async def callbacks(client, query):
             )
 
         elif data == "disc_yes":
+            await ack()
             await safe_edit(msg, "⏳ Disconnecting...")
             await do_disconnect(uid)
             await safe_edit(
@@ -2240,89 +2597,98 @@ async def callbacks(client, query):
             job = JOBS.get(uid)
             if job:
                 stop_job(job)
-                await query.answer("Stopping...")
-                return
-            await query.answer("Nothing is running.", show_alert=True)
-            return
+                await ack("Stopping...")
+            else:
+                await ack("Nothing is running.", True)
 
         elif data == "job_retry":
-            store = RETRY_STORE.get(uid)
+            store = RETRY_STORE.pop(uid, None)
             if not store:
-                await query.answer("Nothing to retry.", show_alert=True)
+                await ack("Nothing to retry.", True)
                 return
             if uid in JOBS:
-                await query.answer("A batch is already running.", show_alert=True)
+                RETRY_STORE[uid] = store
+                await ack("A batch is already running.", True)
                 return
-            await query.answer("Starting...")
+            await ack("Starting...")
             origin = store.get("origin") or msg
             prep = await prepare(client, origin, uid)
             if not prep:
+                RETRY_STORE[uid] = store      # keep it, user can fix and tap again
                 return
             uc, target = prep
-            RETRY_STORE.pop(uid, None)
             await safe_edit(msg, "🔁 **Retrying...**")
             await launch_batch(client, origin, uid, uc, target, store["kind"],
                                store["prefix"], ids=store["ids"])
-            return
 
         # ------------ owner screens ------------
         elif data.startswith("adm_") or data.startswith("bc_"):
             if not is_owner(uid):
-                await query.answer("Owner only.", show_alert=True)
+                await ack("Owner only.", True)
                 return
-            if data not in ("bc_stop", "bc_send"):
-                await query.answer()
 
             if data == "adm_home":
+                await ack()
                 await safe_edit(msg, admin_text(), admin_markup())
             elif data == "adm_stats":
-                await safe_edit(msg, system_stats_text(), admin_back())
+                await ack()
+                await safe_edit(msg, await stats_text_async(), admin_back())
             elif data == "adm_users":
+                await ack()
                 await safe_edit(msg, users_text(), admin_back())
             elif data == "adm_banned":
+                await ack()
                 await safe_edit(msg, banned_text(), admin_back())
             elif data == "adm_broadcast":
+                await ack()
                 await safe_edit(msg, BC_HELP, admin_back())
             elif data == "adm_maint":
+                await ack()
                 set_setting("maintenance", "0" if maintenance_on() else "1")
                 await safe_edit(msg, admin_text(), admin_markup())
             elif data == "adm_cleanup":
+                await ack()
                 await safe_edit(msg, await do_cleanup(), admin_back())
             elif data == "adm_restart":
+                await ack()
                 await safe_edit(
                     msg, "🔄 **Restart the bot?**\nRunning downloads will stop.",
                     Markup([[Btn("✅ Yes, restart", callback_data="adm_restart_yes"),
                              Btn("❌ No", callback_data="adm_home")]]),
                 )
             elif data == "adm_restart_yes":
+                await ack()
                 await safe_edit(msg, "🔄 **Restarting...** Back in a few seconds.")
-                asyncio.create_task(do_restart())
+                spawn(do_restart())
 
             elif data == "bc_cancel":
+                await ack()
                 PENDING_BC.pop(uid, None)
                 await safe_edit(msg, "❌ **Broadcast cancelled.**", admin_back())
             elif data == "bc_stop":
                 BC["stop"] = True
-                await query.answer("Stopping...")
-                return
+                await ack("Stopping...")
             elif data == "bc_send":
                 pend = PENDING_BC.pop(uid, None)
                 if not pend:
-                    await query.answer("Nothing to send (expired).", show_alert=True)
+                    await ack("Nothing to send (expired).", True)
                     return
                 if BC["running"]:
-                    await query.answer("A broadcast is already running.", show_alert=True)
+                    await ack("A broadcast is already running.", True)
                     return
-                await query.answer("Sending...")
+                await ack("Sending...")
                 await safe_edit(msg, bc_text(0, 0, 0, len(pend["ids"]), time()))
-                asyncio.create_task(run_broadcast(client, msg, pend["payload"], pend["ids"]))
+                spawn(run_broadcast(client, msg, pend["payload"], pend["ids"]))
+            else:
+                await ack()
+        else:
+            await ack()
 
     except Exception as e:
         LOGGER(__name__).error(f"Callback error ({data}): {type(e).__name__}: {e}")
-        try:
-            await query.answer("Something went wrong. Try again.", show_alert=True)
-        except Exception:
-            pass
+        await ack("Something went wrong. Try again.", True)
+    finally:
+        await ack()      # never leave a spinner
 
 
 # ============================================================
@@ -2345,7 +2711,10 @@ async def text_router(client, message: Message):
     text = (message.text or "").strip()
 
     if uid in LOGIN:
-        await login_step(client, message)
+        # one login message at a time per user (no double sign_in / double send_code)
+        async with login_lock(uid):
+            if uid in LOGIN:
+                await login_step(client, message)
         return
 
     if uid in CHANNEL_WAIT:
@@ -2365,6 +2734,9 @@ async def text_router(client, message: Message):
         kind = "story" if is_story_link(url) else "post"
         await start_single(client, message, uid, kind, url)
         return
+    if len(links) > 1:
+        await message.reply("ℹ️ Send **one** link at a time, or use /bdl for a range.")
+        return
 
     await send_home(message, uid)
 
@@ -2382,6 +2754,9 @@ async def janitor():
             for uid, st in list(LOGIN.items()):
                 if now - st["ts"] > LOGIN_TIMEOUT:
                     await _end_login(uid)
+            for uid in list(LOGIN_LOCKS):
+                if uid not in LOGIN and not LOGIN_LOCKS[uid].locked():
+                    LOGIN_LOCKS.pop(uid, None)
             for uid, ts in list(CHANNEL_WAIT.items()):
                 if now - ts > 300:
                     CHANNEL_WAIT.pop(uid, None)
@@ -2396,6 +2771,9 @@ async def janitor():
             for uid, ts in list(NOTICE_AT.items()):
                 if now - ts > 300:
                     NOTICE_AT.pop(uid, None)
+            for uid, ts in list(_LAST_TOUCH.items()):
+                if now - ts > 3600:
+                    _LAST_TOUCH.pop(uid, None)
         except Exception:
             LOGGER(__name__).exception("janitor")
 
@@ -2446,9 +2824,12 @@ async def set_commands():
     ]
     try:
         await bot.set_bot_commands(user_cmds)
-        await bot.set_bot_commands(owner_cmds, scope=BotCommandScopeChat(chat_id=PyroConf.OWNER_ID))
     except Exception as e:
         LOGGER(__name__).warning(f"Could not set command menu: {e}")
+    try:
+        await bot.set_bot_commands(owner_cmds, scope=BotCommandScopeChat(chat_id=PyroConf.OWNER_ID))
+    except Exception as e:
+        LOGGER(__name__).warning(f"Could not set owner command menu (owner must /start the bot): {e}")
 
 
 # ============================================================
@@ -2459,23 +2840,45 @@ async def main():
     global download_semaphore
 
     init_db()
+    check_key_health()
     download_semaphore = asyncio.Semaphore(MAX_CONCURRENT_DOWNLOADS)
 
-    LOGGER(__name__).info("MEDIA DOWNLOADER STARTING")
+    LOGGER(__name__).info(f"MEDIA DOWNLOADER STARTING (build {BUILD})")
+    try:
+        ptype = _pyro_utils.get_peer_type(-1002366162620)
+        LOGGER(__name__).info(f"Peer-ID patch active (large channel id -> {ptype})")
+    except Exception as e:
+        LOGGER(__name__).error(f"Peer-ID patch NOT working: {e}")
     LOGGER(__name__).info(
         f"batch max {MAX_BDL_RANGE} | global slots {MAX_CONCURRENT_DOWNLOADS} | "
         f"per-user {PER_USER_DOWNLOADS} | retries {ITEM_RETRIES}"
     )
 
     try:
-        await bot.start()
-    except Unauthorized as e:
-        LOGGER(__name__).error(f"Bot login failed: {e}")
-        sys.exit(FATAL_CODE)
+        cleanup_downloads_root()      # leftovers from a previous crash
+    except Exception:
+        pass
+
+    started = False
+    for _ in range(5):
+        try:
+            await bot.start()
+            started = True
+            break
+        except FloodWait as e:
+            wait = int(getattr(e, "value", 5) or 5)
+            LOGGER(__name__).warning(f"FloodWait on start: sleeping {wait}s")
+            await asyncio.sleep(wait + 1)
+        except (Unauthorized, AccessTokenInvalid, ApiIdInvalid) as e:
+            LOGGER(__name__).error(f"Bot login failed: {e}")
+            print(f"❌ Bot login failed: {e}\n   Check BOT_TOKEN / API_ID / API_HASH in config.py")
+            sys.exit(FATAL_CODE)
+    if not started:
+        sys.exit(1)
 
     await set_commands()
-    asyncio.create_task(janitor())
-    asyncio.create_task(watchdog())
+    spawn(janitor())
+    spawn(watchdog())
 
     me = await bot.get_me()
     LOGGER(__name__).info(f"Bot is online as @{me.username}")
