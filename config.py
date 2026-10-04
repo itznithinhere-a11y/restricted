@@ -1,49 +1,70 @@
-# Copyright (C) @TheSmartBisnu
-# Channel: https://t.me/itsSmartDev
-
+import os
 from time import time
 
+# ═══════════════════════════════════════════════════════════════
+# YAHAN APNI VALUES BHARO
+# ═══════════════════════════════════════════════════════════════
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# TELEGRAM CONFIG
-# ═══════════════════════════════════════════════════════════════════════════════
+# Bot ka apna API ID / HASH (my.telegram.org se)
+API_ID = 39898036
+API_HASH = "2c712fe0455db78196d9ce2c1c61a6b1"
 
-API_ID = 37374661
-API_HASH = "e1956491ead91a58c8c1f263a3f30326"
-BOT_TOKEN = "8803919104:AAEHmgaWjDFi_r2gJqbPPYz3RykhEdu6dYA"
+# @BotFather se NAYA token (purana revoke kar do)
+BOT_TOKEN = "8868005439:AAEGNfhs6wzPQZRTvX2Trp2H-Q9JIlorFIk"
 
-# Pyrogram user session string
-SESSION_STRING = "BQI6SsUAeYd0nTvwaJbJp3RtjG4_lhQpgxjVrRq8eapQXv2x1E2Yn9RlFUTeXA4iat5V7l4kMCLQLA89MnNXluLFG48YNGbsPAIhfWvcYC_-CX_I0-tuvC3k77_Pz5tGXE4aojkWBI3E7zKWrD_T5XqKZ4dCoNtpcck9MLdddjC15qOK9QXi3_-pm0HaegWahS8Qsov2R_XsVzrUP2-CTsKt8ZXpB79Bhw2iR97W8vDvQnHGIra3QbeExn8hK8tHq9nSdQ8dW8O01amoilpRRqMpqyYB54WO6wRA7fkO868eabHwJV2yddjVwjLEBhBneF6AmRXxyI-FjFZm-Cg7m7LD5_UMvwAAAAIHoELPAA"
+# Tumhara Telegram user id (@userinfobot se mil jayega)
+OWNER_ID = 8856853887
+
+# Sirf in users ko allow karna ho to ids daalo, e.g. [111, 222]
+# Khali [] = bot sabke liye public
+ALLOWED_USERS = []
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════
+# ENCRYPTION KEY (automatic)
+# Pehli baar run par "secret.key" file khud ban jayegi.
+# Is file ka BACKUP rakho aur kisi ko share mat karo. Agar delete
+# ho gayi to saare users ko dobara /connect karna padega.
+# ═══════════════════════════════════════════════════════════════
+
+def _load_key(path="secret.key"):
+    if os.path.exists(path):
+        with open(path, "r") as f:
+            return f.read().strip()
+    from cryptography.fernet import Fernet
+    key = Fernet.generate_key().decode()
+    with open(path, "w") as f:
+        f.write(key)
+    return key
+
+
+# ═══════════════════════════════════════════════════════════════
 # BOT SETTINGS
-# ═══════════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════
 
-
-
-FORWARD_CHAT_ID = None
-BATCH_SIZE = 10                  # ek time par max 10 jobs schedule
-MAX_CONCURRENT_DOWNLOADS = 2    # actual simultaneous downloads
+MAX_CONCURRENT_DOWNLOADS = 4     # sabhi users ka total simultaneous downloads
+PER_USER_DOWNLOADS = 2           # ek user ke simultaneous downloads
+BATCH_SIZE = 5
 FLOOD_WAIT_DELAY = 2
-MAX_BDL_RANGE = 2000
+MAX_BDL_RANGE = 5000
 BDL_RETRIES = 3
 BDL_PROGRESS_EVERY = 10
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# PYROGRAM CONFIG
-# ═══════════════════════════════════════════════════════════════════════════════
 
 class PyroConf:
     API_ID = API_ID
     API_HASH = API_HASH
     BOT_TOKEN = BOT_TOKEN
-    SESSION_STRING = SESSION_STRING
+    OWNER_ID = OWNER_ID
+    ALLOWED_USERS = ALLOWED_USERS
+    ENCRYPTION_KEY = _load_key()
 
     BOT_START_TIME = time()
 
     MAX_CONCURRENT_DOWNLOADS = MAX_CONCURRENT_DOWNLOADS
+    PER_USER_DOWNLOADS = PER_USER_DOWNLOADS
     BATCH_SIZE = BATCH_SIZE
     FLOOD_WAIT_DELAY = FLOOD_WAIT_DELAY
-
-    FORWARD_CHAT_ID = FORWARD_CHAT_ID
+    MAX_BDL_RANGE = MAX_BDL_RANGE
+    BDL_RETRIES = BDL_RETRIES
+    BDL_PROGRESS_EVERY = BDL_PROGRESS_EVERY
