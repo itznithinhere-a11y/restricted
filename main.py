@@ -216,7 +216,7 @@ def cfg(name, default):
     return default if value is None else value
 
 
-MAX_BDL_RANGE = cfg("MAX_BDL_RANGE", 500)
+MAX_BDL_RANGE = cfg("MAX_BDL_RANGE", 2000)
 MAX_CONCURRENT_DOWNLOADS = max(1, cfg("MAX_CONCURRENT_DOWNLOADS", 4))
 PER_USER_DOWNLOADS = max(1, cfg("PER_USER_DOWNLOADS", 2))
 FLOOD_WAIT_DELAY = max(0, cfg("FLOOD_WAIT_DELAY", 2))
@@ -1701,18 +1701,49 @@ async def guarded(kind, client, message, url, target, uc, uid):
         return RETRY, f"Telegram rate limit ({wait}s)"
 
 
-async def run_with_retries(kind, client, message, url, target, uc, uid, stop_check=None):
-    """Runs one item with automatic retries. Returns (status, reason)."""
-    status, reason = RETRY, ""
-    for attempt in range(ITEM_RETRIES + 1):
+async def run_with_retries(
+    kind, client, message, url, target, uc, uid, stop_check=None
+):
+    """Retry temporary failures until success, permanent error, or stop."""
+    attempt = 0
+
+    while True:
         if stop_check and stop_check():
             return STOPPED, ""
-        status, reason = await guarded(kind, client, message, url, target, uc, uid)
+
+        try:
+            status, reason = await guarded(
+                kind, client, message, url, target, uc, uid
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            LOGGER(__name__).exception(
+                f"[{uid}] retry attempt {attempt + 1} failed: {url}"
+            )
+            status, reason = RETRY, f"Unexpected error: {short(e, 80)}"
+
         if status != RETRY:
-            break
-        if attempt < ITEM_RETRIES:
-            await asyncio.sleep(3 * (attempt + 1))
-    return status, reason
+            return status, reason
+
+        attempt += 1
+
+        # Exponential backoff, capped at 60 seconds.
+        delay = min(2 ** min(attempt, 6), 60)
+
+        LOGGER(__name__).warning(
+            f"[{uid}] Retrying item after attempt {attempt}: "
+            f"{short(reason, 100)}; next attempt in {delay}s"
+        )
+
+        # Sleep in short intervals so Stop can interrupt the wait.
+        remaining = delay
+        while remaining > 0:
+            if stop_check and stop_check():
+                return STOPPED, ""
+            step = min(remaining, 1)
+            await asyncio.sleep(step)
+            remaining -= step
 
 
 # ============================================================

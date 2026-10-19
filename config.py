@@ -46,7 +46,7 @@ MAX_CONCURRENT_DOWNLOADS = 4     # sabhi users ka total simultaneous downloads
 PER_USER_DOWNLOADS = 2           # ek user ke simultaneous downloads
 BATCH_SIZE = 5
 FLOOD_WAIT_DELAY = 2
-MAX_BDL_RANGE = 5000
+MAX_BDL_RANGE = 2000
 BDL_RETRIES = 3
 BDL_PROGRESS_EVERY = 10
 
